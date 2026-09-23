@@ -1,0 +1,3 @@
+Virtum SVS Viewer v0.5.2.1
+status=ok
+build=vercel-ready-mobile-memory-fix

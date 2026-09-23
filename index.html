@@ -1,0 +1,594 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0c0d0f" />
+  <meta name="description" content="Visualizador local de lâminas histológicas SVS com anotações, medições, comparação, modo aula e relatórios." />
+  <meta name="application-name" content="Virtum SVS Viewer" />
+  <meta name="referrer" content="no-referrer" />
+  <meta name="format-detection" content="telephone=no" />
+  <link rel="icon" href="./assets/icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="./style.css" />
+  <title>Virtum SVS Viewer</title>
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <img src="./assets/icon.svg" alt="" width="30" height="30" />
+        <div class="brand-copy">
+          <strong>Virtum SVS Viewer</strong>
+          <span>v0.5.2.1 · Mobile Memory Fix</span>
+        </div>
+      </div>
+
+      <div class="toolbar" role="toolbar" aria-label="Ferramentas do visualizador">
+        <button id="panelBtn" class="btn compact mobile-only" type="button" aria-expanded="false" aria-controls="sidebar" data-tip="Abrir painel lateral">Painel</button>
+        <button id="openBtn" class="btn primary compact" type="button" data-tip="Abrir uma lâmina .SVS">Abrir</button>
+        <input id="fileInput" type="file" accept=".svs" hidden />
+        <input id="compareFileInput" type="file" accept=".svs" hidden />
+        <input id="annotationsFileInput" type="file" accept=".json,application/json" hidden />
+        <button id="homeBtn" class="btn compact" type="button" data-tip="Ajustar a lâmina à tela">Ajustar</button>
+        <button id="measureBtn" class="btn compact" type="button" aria-pressed="false" data-tip="Medir distância entre dois pontos">Medir</button>
+        <button id="markerBtn" class="btn compact" type="button" aria-pressed="false" data-tip="Adicionar marcador. Duplo clique na lâmina também cria uma anotação.">Anotar</button>
+        <div class="more-wrap">
+          <button id="moreBtn" class="btn compact more-btn" type="button" aria-expanded="false" aria-controls="moreMenu" aria-haspopup="menu" data-tip="Mais ferramentas">Mais ···</button>
+          <div id="moreMenu" class="more-menu" role="menu" aria-label="Mais ferramentas" hidden>
+            <div class="more-menu-group" aria-label="Zoom">
+              <button id="zoomOutBtn" class="menu-action" type="button" role="menuitem" data-tip="Diminuir zoom"><span>−</span> Zoom</button>
+              <button id="zoomInBtn" class="menu-action" type="button" role="menuitem" data-tip="Aumentar zoom"><span>+</span> Zoom</button>
+            </div>
+            <div class="more-menu-group" aria-label="Histórico">
+              <button id="undoBtn" class="menu-action" type="button" role="menuitem" disabled data-tip="Desfazer última alteração (Ctrl+Z)">↶ Desfazer</button>
+              <button id="redoBtn" class="menu-action" type="button" role="menuitem" disabled data-tip="Refazer alteração (Ctrl+Y)">↷ Refazer</button>
+            </div>
+            <button id="areaBtn" class="menu-action" type="button" role="menuitem" aria-pressed="false" data-tip="Delimitar uma área da lâmina">Área</button>
+            <button id="captureBtn" class="menu-action" type="button" role="menuitem" data-tip="Salvar uma captura PNG da área visível">Capturar</button>
+            <button id="rotateBtn" class="menu-action" type="button" role="menuitem" data-tip="Girar a lâmina em 90 graus">Girar 90°</button>
+            <button id="libraryBtn" class="menu-action" type="button" role="menuitem" data-tip="Abrir a biblioteca local">Biblioteca</button>
+            <button id="deviceDiagBtn" class="menu-action" type="button" role="menuitem" data-tip="Ver diagnóstico do dispositivo antes ou depois de abrir uma lâmina">Diagnóstico</button>
+            <button id="compareBtn" class="menu-action" type="button" role="menuitem" data-tip="Comparar esta lâmina com outra lado a lado">Comparar</button>
+            <button id="lessonBtn" class="menu-action" type="button" role="menuitem" data-tip="Preparar ou apresentar uma sequência de anotações">Modo Aula</button>
+            <button id="presentationBtn" class="menu-action" type="button" role="menuitem" aria-pressed="false" data-tip="Ocultar barras e painel para apresentação">Apresentar</button>
+            <button id="fullscreenBtn" class="menu-action" type="button" role="menuitem" data-tip="Alternar tela cheia">Tela cheia</button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <section id="libraryScreen" class="library-screen" aria-label="Biblioteca de lâminas">
+      <div class="library-shell">
+        <div class="library-hero">
+          <div>
+            <span class="library-kicker">Virtum SVS Viewer</span>
+            <h1>Sua biblioteca de lâminas</h1>
+            <p>Organize projetos, favoritos e sessões. Os arquivos <strong>.SVS continuam no seu dispositivo.</strong></p>
+          </div>
+          <div class="library-hero-actions">
+            <button id="libraryDiagBtn" class="btn library-diag-btn" type="button" data-tip="Ver desempenho e modo de memória antes de abrir uma lâmina">Diagnóstico</button>
+            <button id="libraryOpenBtn" class="btn primary library-open-btn" type="button">Abrir .SVS</button>
+          </div>
+        </div>
+
+        <div class="library-controls">
+          <label class="library-search" for="librarySearch">
+            <span aria-hidden="true">⌕</span>
+            <input id="librarySearch" type="search" autocomplete="off" placeholder="Buscar lâmina ou sessão…" />
+          </label>
+          <div id="libraryCategoryChips" class="library-chips" aria-label="Filtrar por categoria">
+            <button class="library-chip is-active" type="button" data-library-category="all">Todas</button>
+            <button class="library-chip" type="button" data-library-category="Histologia">Histologia</button>
+            <button class="library-chip" type="button" data-library-category="Anatomia">Anatomia</button>
+            <button class="library-chip" type="button" data-library-category="Patologia">Patologia</button>
+            <button class="library-chip" type="button" data-library-category="Outros">Outros</button>
+          </div>
+        </div>
+
+        <div class="library-content">
+          <section class="library-section">
+            <div class="library-section-head">
+              <div><h2>Recentes</h2><p>Projetos e lâminas usados recentemente.</p></div>
+              <span id="libraryRecentCount" class="library-count">0</span>
+            </div>
+            <div id="libraryRecentGrid" class="library-grid"></div>
+          </section>
+
+          <section id="libraryFavoritesSection" class="library-section">
+            <div class="library-section-head">
+              <div><h2>Favoritos</h2><p>Acesso rápido às lâminas que você mais usa.</p></div>
+              <span id="libraryFavoriteCount" class="library-count">0</span>
+            </div>
+            <div id="libraryFavoritesGrid" class="library-grid"></div>
+          </section>
+
+          <section class="library-section">
+            <div class="library-section-head">
+              <div><h2>Sessões salvas</h2><p>Snapshots locais com anotações, medições e ajustes.</p></div>
+              <span id="librarySessionCount" class="library-count">0</span>
+            </div>
+            <div id="librarySessionsList" class="library-session-list"></div>
+          </section>
+        </div>
+
+        <div id="libraryEmpty" class="library-empty" hidden>
+          <div class="library-empty-icon">◫</div>
+          <strong>Nada por aqui ainda</strong>
+          <p>Abra uma lâmina SVS para ela aparecer na biblioteca local.</p>
+          <button id="libraryEmptyOpenBtn" class="btn primary" type="button">Selecionar lâmina</button>
+        </div>
+      </div>
+    </section>
+
+    <main class="workspace">
+      <aside id="sidebar" class="sidebar" aria-label="Informações e ferramentas">
+        <div class="panel-head">
+          <div class="panel-tabs" role="tablist" aria-label="Seções do painel">
+            <button id="tab-slide" class="panel-tab is-active" type="button" role="tab" data-panel-target="panel-slide" aria-selected="true" aria-controls="panel-slide" tabindex="0" data-tip="Resumo da lâmina">Lâmina</button>
+            <button id="tab-image" class="panel-tab" type="button" role="tab" data-panel-target="panel-image" aria-selected="false" aria-controls="panel-image" tabindex="-1" data-tip="Ajustes de imagem">Imagem</button>
+            <button id="tab-notes" class="panel-tab" type="button" role="tab" data-panel-target="panel-notes" aria-selected="false" aria-controls="panel-notes" tabindex="-1" data-tip="Medições e anotações">Notas</button>
+            <button id="tab-diagnostics" class="panel-tab" type="button" role="tab" data-panel-target="panel-diagnostics" aria-selected="false" aria-controls="panel-diagnostics" tabindex="-1" data-tip="Diagnóstico e desempenho">Diag.</button>
+          </div>
+          <button id="collapseSidebarBtn" class="sidebar-collapse-btn" type="button" aria-label="Recolher painel" data-tip="Recolher painel">‹</button>
+        </div>
+
+        <div class="panel-pages">
+          <div id="panel-slide" class="panel-page" role="tabpanel" aria-labelledby="tab-slide" data-panel-page="panel-slide">
+            <section>
+              <h2>Resumo</h2>
+              <dl class="meta-list meta-list-compact">
+                <div><dt>Arquivo</dt><dd id="metaName">Nenhuma lâmina aberta</dd></div>
+                <div><dt>Ampliação</dt><dd id="metaMagnification">—</dd></div>
+                <div><dt>MPP</dt><dd id="metaMpp">—</dd></div>
+                <div><dt>Qualidade</dt><dd id="metaQuality">—</dd></div>
+                <div><dt>Motor</dt><dd id="engineState" data-state="standby">Em espera</dd></div>
+              </dl>
+            </section>
+
+            <section>
+              <details class="disclosure-card">
+                <summary data-tip="Metadados técnicos da lâmina">Detalhes</summary>
+                <dl class="meta-list details-list">
+                  <div><dt>Tamanho do arquivo</dt><dd id="metaSize">—</dd></div>
+                  <div><dt>Dimensões</dt><dd id="metaDimensions">—</dd></div>
+                  <div><dt>Níveis</dt><dd id="metaLevels">—</dd></div>
+                  <div><dt>Vendor</dt><dd id="metaVendor">—</dd></div>
+                  <div><dt>Compatibilidade</dt><dd id="compatInfo">—</dd></div>
+                </dl>
+              </details>
+            </section>
+
+            <section>
+              <h2>Projeto</h2>
+              <div class="project-actions">
+                <button id="saveAnnotationsBtn" class="small-btn" type="button" disabled data-tip="Salvar medições, anotações e ajustes em JSON">Salvar</button>
+                <button id="loadAnnotationsBtn" class="small-btn" type="button" disabled data-tip="Carregar um projeto JSON">Abrir</button>
+                <button id="saveSessionBtn" class="small-btn" type="button" disabled data-tip="Salvar uma sessão na biblioteca local">Sessão</button>
+                <button id="reportBtn" class="small-btn" type="button" disabled data-tip="Exportar PDF, PNG anotado ou HTML">Relatório</button>
+              </div>
+              <div id="autosaveState" class="autosave-state" role="status" aria-live="polite">Autosave local · aguardando lâmina</div>
+            </section>
+
+            <div class="local-badge" data-tip="O arquivo SVS e as anotações são processados somente neste dispositivo.">● Local</div>
+          </div>
+
+          <div id="panel-image" class="panel-page" role="tabpanel" aria-labelledby="tab-image" data-panel-page="panel-image" hidden>
+            <section>
+              <h2>Imagem</h2>
+              <label class="select-row" for="perfProfileSelect">
+                <span>Qualidade</span>
+                <select id="perfProfileSelect">
+                  <option value="auto">Automático</option>
+                  <option value="balanced">Equilibrado</option>
+                  <option value="quality">Qualidade</option>
+                  <option value="performance">Desempenho</option>
+                </select>
+              </label>
+              <label class="range-row" for="brightnessRange">
+                <span>Brilho <b id="brightnessValue">100%</b></span>
+                <input id="brightnessRange" type="range" min="50" max="160" step="5" value="100" />
+              </label>
+              <label class="range-row" for="contrastRange">
+                <span>Contraste <b id="contrastValue">100%</b></span>
+                <input id="contrastRange" type="range" min="50" max="180" step="5" value="100" />
+              </label>
+              <label class="range-row" for="sharpnessRange">
+                <span>Nitidez <b id="sharpnessValue">0%</b></span>
+                <input id="sharpnessRange" type="range" min="0" max="50" step="5" value="0" />
+              </label>
+              <details class="disclosure-card advanced-card">
+                <summary>Avançado</summary>
+                <label class="range-row" for="saturationRange">
+                  <span>Saturação <b id="saturationValue">100%</b></span>
+                  <input id="saturationRange" type="range" min="70" max="150" step="5" value="100" />
+                </label>
+                <label class="toggle-row" for="highQualityToggle">
+                  <input id="highQualityToggle" type="checkbox" />
+                  <span>Alta definição</span>
+                </label>
+                <label class="toggle-row" for="pixelPerfectToggle">
+                  <input id="pixelPerfectToggle" type="checkbox" />
+                  <span>Pixel 1:1 (nativo)</span>
+                </label>
+              </details>
+              <div class="quality-actions">
+                <button id="maxQualityBtn" class="small-btn" type="button" disabled>Qualidade máxima</button>
+                <button id="nativeZoomBtn" class="small-btn" type="button" disabled>Ir para 1:1</button>
+              </div>
+              <button id="resetVisualBtn" class="small-btn full" type="button" disabled>Restaurar imagem</button>
+            </section>
+          </div>
+
+          <div id="panel-notes" class="panel-page" role="tabpanel" aria-labelledby="tab-notes" data-panel-page="panel-notes" hidden>
+            <section>
+              <div class="section-title-row">
+                <h2>Medições</h2>
+                <button id="clearMeasurementsBtn" class="text-button" type="button" disabled>Limpar</button>
+              </div>
+              <p id="measureHelp" class="measure-help">Ative <strong>Medir</strong> e marque dois pontos na lâmina.</p>
+              <ol id="measurementList" class="measurement-list" aria-live="polite">
+                <li class="measurement-empty">Nenhuma medição.</li>
+              </ol>
+            </section>
+
+            <section>
+              <div class="section-title-row">
+                <h2>Anotações</h2>
+                <button id="clearAnnotationsBtn" class="text-button" type="button" disabled>Limpar</button>
+              </div>
+              <div class="annotation-tool-grid" role="toolbar" aria-label="Ferramentas de anotação">
+                <button id="proMarkerBtn" class="annotation-tool-btn" type="button" data-annotation-tool="marker" aria-pressed="false" title="Marcador de ponto">●<span>Ponto</span></button>
+                <button id="proArrowBtn" class="annotation-tool-btn" type="button" data-annotation-tool="arrow" aria-pressed="false" title="Seta entre dois pontos">↗<span>Seta</span></button>
+                <button id="proCircleBtn" class="annotation-tool-btn" type="button" data-annotation-tool="circle" aria-pressed="false" title="Círculo por centro e raio">○<span>Círculo</span></button>
+                <button id="proRectBtn" class="annotation-tool-btn" type="button" data-annotation-tool="rect" aria-pressed="false" title="Retângulo por dois cantos">▭<span>Retâng.</span></button>
+                <button id="proTextBtn" class="annotation-tool-btn" type="button" data-annotation-tool="text" aria-pressed="false" title="Texto livre sobre a lâmina">T<span>Texto</span></button>
+                <button id="proAreaBtn" class="annotation-tool-btn" type="button" data-annotation-tool="area" aria-pressed="false" title="Área livre com vários pontos">⬡<span>Área</span></button>
+              </div>
+              <p id="annotationHelp" class="measure-help">Escolha uma ferramenta e toque na lâmina.</p>
+              <div class="annotation-actions">
+                <button id="finishAreaBtn" class="small-btn" type="button" disabled>Finalizar área</button>
+                <button id="cancelAreaBtn" class="small-btn" type="button" disabled>Cancelar desenho</button>
+              </div>
+              <ol id="annotationList" class="measurement-list annotation-list" aria-live="polite">
+                <li class="measurement-empty">Nenhuma anotação.</li>
+              </ol>
+              <div class="annotation-groups-card">
+                <div class="section-title-row compact-row">
+                  <h3>Grupos</h3>
+                  <div class="group-visibility-actions">
+                    <button id="showAllGroupsBtn" class="text-button" type="button">Mostrar</button>
+                    <button id="hideAllGroupsBtn" class="text-button" type="button">Ocultar</button>
+                  </div>
+                </div>
+                <div id="annotationGroupFilters" class="annotation-group-filters" aria-label="Visibilidade por grupo"></div>
+              </div>
+            </section>
+
+            <section class="lesson-setup-card">
+              <div class="section-title-row">
+                <h2>Modo Aula</h2>
+                <span id="lessonCountBadge" class="lesson-count-badge">0 etapas</span>
+              </div>
+              <p class="measure-help">Organize anotações em uma sequência e navegue por elas durante a apresentação.</p>
+              <label class="lesson-title-row" for="lessonTitleInput">
+                <span>Título</span>
+                <input id="lessonTitleInput" maxlength="80" autocomplete="off" placeholder="Ex.: Tecido conjuntivo" />
+              </label>
+              <div class="lesson-primary-actions">
+                <button id="prepareLessonBtn" class="small-btn" type="button" aria-pressed="false" disabled>Preparar</button>
+                <button id="presentLessonBtn" class="small-btn lesson-present-btn" type="button" disabled>Apresentar</button>
+              </div>
+              <div id="lessonEditor" class="lesson-editor" hidden>
+                <div class="lesson-add-row">
+                  <select id="lessonAnnotationSelect" aria-label="Escolher anotação para adicionar à aula">
+                    <option value="">Escolher anotação…</option>
+                  </select>
+                  <button id="addLessonStepBtn" class="small-btn" type="button" disabled>Adicionar</button>
+                </div>
+                <ol id="lessonSequenceList" class="lesson-sequence-list" aria-live="polite"></ol>
+                <button id="clearLessonBtn" class="text-button lesson-clear-btn" type="button" disabled>Limpar sequência</button>
+              </div>
+            </section>
+          </div>
+
+          <div id="panel-diagnostics" class="panel-page" role="tabpanel" aria-labelledby="tab-diagnostics" data-panel-page="panel-diagnostics" hidden>
+            <section>
+              <h2>Diagnóstico e desempenho</h2>
+              <dl class="meta-list diag-list">
+                <div><dt>Nível SVS atual</dt><dd id="diagLevel">—</dd></div>
+                <div><dt>Resolução efetiva</dt><dd id="diagEffectiveRes">—</dd></div>
+                <div><dt>MPP efetivo</dt><dd id="diagCurrentMpp">—</dd></div>
+                <div><dt>Ampliação aprox.</dt><dd id="diagApproxMag">—</dd></div>
+                <div><dt>Tiles</dt><dd id="diagTiles">—</dd></div>
+                <div><dt>Cache / fila</dt><dd id="diagCache">—</dd></div>
+                <div><dt>Dispositivo</dt><dd id="diagDevice">—</dd></div>
+                <div><dt>Benchmark</dt><dd id="diagBenchmark">—</dd></div>
+                <div><dt>Perfil automático</dt><dd id="diagAdaptiveProfile">—</dd></div>
+                <div><dt>Workers</dt><dd id="diagWorkers">—</dd></div>
+                <div><dt>Modo de memória</dt><dd id="diagMemoryMode">—</dd></div>
+              </dl>
+              <label class="toggle-row memory-safe-row" for="memorySafeToggle">
+                <input id="memorySafeToggle" type="checkbox" />
+                <span>Modo seguro para tablet / pouca memória</span>
+              </label>
+              <div class="diagnostic-actions">
+                <button id="rerunBenchmarkBtn" class="small-btn" type="button" data-tip="Executar novamente a avaliação rápida deste dispositivo">Reavaliar dispositivo</button>
+              </div>
+              <p id="qualityHint" class="measure-help">Sem lâmina aberta.</p>
+            </section>
+
+            <section>
+              <h2>Atalhos</h2>
+              <div class="shortcut-grid">
+                <p class="tip"><kbd>Scroll</kbd><span>Zoom</span></p>
+                <p class="tip"><kbd>Pinça</kbd><span>Zoom no touch</span></p>
+                <p class="tip"><kbd>Arrastar</kbd><span>Mover lâmina</span></p>
+                <p class="tip"><kbd>M</kbd><span>Medir</span></p>
+                <p class="tip"><kbd>P</kbd><span>Marcador</span></p>
+                <p class="tip"><kbd>A</kbd><span>Área</span></p>
+                <p class="tip"><kbd>C</kbd><span>Capturar</span></p>
+                <p class="tip"><kbd>F</kbd><span>Ajustar</span></p>
+                <p class="tip"><kbd>Ctrl+Z</kbd><span>Desfazer</span></p>
+                <p class="tip"><kbd>Ctrl+Y</kbd><span>Refazer</span></p>
+                <p class="tip"><kbd>Ctrl+S</kbd><span>Salvar JSON</span></p>
+                <p class="tip"><kbd>← →</kbd><span>Navegar na aula</span></p>
+              </div>
+            </section>
+          </div>
+        </div>
+      </aside>
+      <button id="sidebarBackdrop" class="sidebar-backdrop" type="button" aria-label="Fechar painel" hidden></button>
+
+      <section id="viewerShell" class="viewer-shell">
+        <button id="sidebarRevealBtn" class="sidebar-reveal-btn" type="button" aria-label="Mostrar painel" data-tip="Mostrar painel">›</button>
+        <button id="presentationExitBtn" class="presentation-exit-btn" type="button" aria-label="Sair do modo apresentação">Sair da apresentação</button>
+        <div id="qualityBadge" class="quality-badge" hidden>—</div>
+        <div id="compareToolbar" class="compare-toolbar" hidden>
+          <div class="compare-toolbar-copy">
+            <strong>Comparação</strong>
+            <span id="compareStatusText">Selecione a segunda lâmina</span>
+          </div>
+          <label class="compare-sync-toggle" data-tip="Sincronizar posição e zoom entre as duas lâminas">
+            <input id="compareSyncToggle" type="checkbox" checked />
+            <span>Sincronizar</span>
+          </label>
+          <button id="compareOpenBtn" class="small-btn" type="button">Trocar B</button>
+          <button id="compareCloseBtn" class="small-btn" type="button">Fechar</button>
+        </div>
+        <div id="lessonPresentationBar" class="lesson-presentation-bar" hidden>
+          <button id="lessonPrevBtn" class="lesson-nav-btn" type="button" aria-label="Etapa anterior">←</button>
+          <div class="lesson-presentation-copy">
+            <div class="lesson-presentation-meta">
+              <span id="lessonPresentationTitle">Modo Aula</span>
+              <span id="lessonCounter">0 / 0</span>
+            </div>
+            <strong id="lessonStepTitle">—</strong>
+            <p id="lessonStepNote" hidden></p>
+          </div>
+          <button id="lessonNextBtn" class="lesson-nav-btn lesson-next-btn" type="button" aria-label="Próxima etapa">→</button>
+          <button id="lessonExitBtn" class="lesson-exit-btn" type="button" aria-label="Sair do modo aula">×</button>
+        </div>
+        <div class="primary-pane-label"><span class="compare-letter">A</span><span id="primaryCompareName">Lâmina principal</span></div>
+        <div id="viewer" class="viewer"></div>
+        <svg id="measurementOverlay" class="measurement-overlay" aria-hidden="true"></svg>
+        <svg id="annotationOverlay" class="annotation-overlay" aria-hidden="true"></svg>
+
+        <section id="comparePane" class="compare-pane" aria-label="Segunda lâmina para comparação" hidden>
+          <div class="compare-pane-label">
+            <span class="compare-letter">B</span>
+            <span id="compareFileName">Segunda lâmina</span>
+          </div>
+          <div id="compareViewer" class="compare-viewer"></div>
+          <div id="compareBusy" class="compare-busy" hidden>
+            <div class="spinner"></div>
+            <span>Abrindo segunda lâmina…</span>
+          </div>
+          <div id="compareEmpty" class="compare-empty">
+            <strong>Comparar com outra lâmina</strong>
+            <p>Abra uma segunda lâmina SVS para visualizar lado a lado.</p>
+            <button id="compareEmptyOpenBtn" class="btn primary" type="button">Abrir segunda lâmina</button>
+          </div>
+        </section>
+
+        <div id="scaleBar" class="scale-bar" hidden>
+          <span id="scaleLabel">—</span>
+          <i id="scaleLine"></i>
+        </div>
+
+        <div id="toolBadge" class="tool-badge" hidden>Ferramenta ativa</div>
+
+        <div id="emptyState" class="empty-state">
+          <div class="slide-mark" aria-hidden="true">◫</div>
+          <h1>Microscópio digital no navegador</h1>
+          <p id="emptyLead">Abra uma lâmina Aperio .SVS armazenada no dispositivo.</p>
+          <button id="emptyOpenBtn" class="btn primary large" type="button">Selecionar lâmina</button>
+          <small id="emptyHint">Arquivos grandes são lidos por partes. Não é necessário carregar a lâmina inteira na memória.</small>
+        </div>
+
+        <div id="dropOverlay" class="drop-overlay" hidden>Solte a lâmina .SVS aqui</div>
+        <div id="busy" class="busy" hidden>
+          <div class="spinner"></div>
+          <strong id="busyTitle">Inicializando...</strong>
+          <span id="busyText">Preparando o motor de lâminas</span>
+        </div>
+      </section>
+    </main>
+
+    <footer class="statusbar">
+      <span id="statusText">Pronto para selecionar uma lâmina .SVS</span>
+      <div class="status-right">
+        <span id="positionText">Posição —</span>
+        <span id="zoomText">Zoom —</span>
+      </div>
+    </footer>
+  </div>
+
+  <div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+
+  <dialog id="sessionDialog" class="annotation-dialog session-dialog">
+    <form id="sessionForm" method="dialog">
+      <div class="dialog-head">
+        <strong>Salvar sessão</strong>
+        <button id="sessionDialogClose" class="dialog-x" type="button" aria-label="Fechar">×</button>
+      </div>
+      <label>
+        <span>Nome da sessão</span>
+        <input id="sessionNameInput" maxlength="80" autocomplete="off" placeholder="Ex.: Aula 03 · tecido conjuntivo" />
+      </label>
+      <label>
+        <span>Categoria</span>
+        <select id="sessionCategorySelect">
+          <option value="Histologia">Histologia</option>
+          <option value="Anatomia">Anatomia</option>
+          <option value="Patologia">Patologia</option>
+          <option value="Outros">Outros</option>
+        </select>
+      </label>
+      <div class="dialog-actions">
+        <button id="sessionCancelBtn" class="btn" type="button">Cancelar</button>
+        <button class="btn primary" type="submit">Salvar sessão</button>
+      </div>
+    </form>
+  </dialog>
+
+
+  <dialog id="startupDiagDialog" class="annotation-dialog startup-diag-dialog">
+    <form id="startupDiagForm" method="dialog">
+      <div class="dialog-head">
+        <div>
+          <strong>Diagnóstico do dispositivo</strong>
+          <small>Disponível antes de abrir qualquer lâmina.</small>
+        </div>
+        <button id="startupDiagClose" class="dialog-x" type="button" aria-label="Fechar">×</button>
+      </div>
+
+      <div id="startupSafetyNotice" class="startup-safety-notice" role="status"></div>
+
+      <dl class="meta-list startup-diag-list">
+        <div><dt>Dispositivo</dt><dd id="startupDiagDevice">—</dd></div>
+        <div><dt>Benchmark</dt><dd id="startupDiagBenchmark">—</dd></div>
+        <div><dt>Perfil automático</dt><dd id="startupDiagProfile">—</dd></div>
+        <div><dt>Workers</dt><dd id="startupDiagWorkers">—</dd></div>
+        <div><dt>Cache / fila</dt><dd id="startupDiagCache">—</dd></div>
+        <div><dt>Modo de memória</dt><dd id="startupDiagMemory">—</dd></div>
+        <div><dt>Compatibilidade</dt><dd id="startupDiagCompat">—</dd></div>
+      </dl>
+
+      <label class="select-row startup-profile-row" for="startupPerfProfileSelect">
+        <span>Perfil antes de abrir</span>
+        <select id="startupPerfProfileSelect">
+          <option value="auto">Automático</option>
+          <option value="balanced">Equilibrado</option>
+          <option value="quality">Qualidade</option>
+          <option value="performance">Desempenho</option>
+        </select>
+      </label>
+
+      <label class="toggle-row startup-safe-toggle" for="startupSafeModeToggle">
+        <input id="startupSafeModeToggle" type="checkbox" />
+        <span>Modo seguro para tablet / pouca memória</span>
+      </label>
+      <p class="startup-diag-help">No modo seguro o Viewer usa 1 worker, cache reduzido, fila curta e preload desligado. É o padrão em tablets e dispositivos com memória limitada.</p>
+
+      <div class="dialog-actions startup-diag-actions">
+        <button id="startupRerunBenchmarkBtn" class="btn" type="button">Reavaliar</button>
+        <button id="startupDiagDoneBtn" class="btn primary" type="button">Fechar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="reportDialog" class="annotation-dialog report-dialog">
+    <form id="reportForm" method="dialog">
+      <div class="dialog-head">
+        <div>
+          <strong>Relatório & Exportação</strong>
+          <small>PDF profissional com captura anotada, medições e Modo Aula.</small>
+        </div>
+        <button id="reportDialogClose" class="dialog-x" type="button" aria-label="Fechar">×</button>
+      </div>
+
+      <div class="report-field-grid">
+        <label class="report-field-wide">
+          <span>Título</span>
+          <input id="reportTitleInput" maxlength="120" autocomplete="off" placeholder="Relatório de Lâmina Histológica" />
+        </label>
+        <label>
+          <span>Professor(a)</span>
+          <input id="reportProfessorInput" maxlength="80" autocomplete="off" placeholder="Nome do professor" />
+        </label>
+        <label>
+          <span>Aluno(a)</span>
+          <input id="reportStudentInput" maxlength="80" autocomplete="off" placeholder="Nome do aluno" />
+        </label>
+        <label class="report-field-wide">
+          <span>Instituição / disciplina</span>
+          <input id="reportInstitutionInput" maxlength="120" autocomplete="off" placeholder="Opcional" />
+        </label>
+      </div>
+
+      <fieldset class="report-options">
+        <legend>Conteúdo do relatório</legend>
+        <label><input id="reportIncludeImage" type="checkbox" checked /> Captura anotada da região visível</label>
+        <label><input id="reportIncludeMeasurements" type="checkbox" checked /> Medições</label>
+        <label><input id="reportIncludeAnnotations" type="checkbox" checked /> Legenda numerada das anotações</label>
+        <label><input id="reportIncludeLesson" type="checkbox" checked /> Sequência do Modo Aula</label>
+      </fieldset>
+
+      <p id="reportSummary" class="report-summary">—</p>
+
+      <div class="report-export-grid">
+        <button id="reportPngBtn" class="btn" type="button">PNG anotado</button>
+        <button id="reportHtmlBtn" class="btn" type="button">HTML</button>
+        <button id="reportPdfBtn" class="btn primary" type="button">Gerar PDF</button>
+      </div>
+      <div class="dialog-actions report-dialog-actions">
+        <button id="reportCancelBtn" class="btn" type="button">Fechar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="annotationDialog" class="annotation-dialog">
+    <form id="annotationForm" method="dialog">
+      <div class="dialog-head">
+        <strong id="annotationDialogTitle">Novo marcador</strong>
+        <button id="annotationDialogClose" class="dialog-x" type="button" aria-label="Fechar">×</button>
+      </div>
+      <label>
+        <span>Título</span>
+        <input id="annotationTitleInput" maxlength="80" autocomplete="off" />
+      </label>
+      <label id="annotationTextRow" hidden>
+        <span>Texto visível</span>
+        <input id="annotationTextInput" maxlength="160" autocomplete="off" placeholder="Texto mostrado sobre a lâmina" />
+      </label>
+      <div class="annotation-style-row">
+        <label>
+          <span>Cor</span>
+          <input id="annotationColorInput" type="color" value="#ffd166" />
+        </label>
+        <label>
+          <span>Grupo</span>
+          <input id="annotationGroupInput" list="annotationGroupOptions" maxlength="40" autocomplete="off" placeholder="Geral" />
+          <datalist id="annotationGroupOptions"></datalist>
+        </label>
+      </div>
+      <label>
+        <span>Observação</span>
+        <textarea id="annotationNoteInput" rows="4" maxlength="500" placeholder="Ex.: região com maior concentração celular"></textarea>
+      </label>
+      <div class="dialog-actions">
+        <button id="annotationCancelBtn" class="btn" type="button">Cancelar</button>
+        <button id="annotationSaveBtn" class="btn primary" type="submit">Salvar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="./src/main.js"></script>
+  <svg class="svg-defs" aria-hidden="true" focusable="false">
+    <filter id="svsSharpenFilter" x="-10%" y="-10%" width="120%" height="120%">
+      <feConvolveMatrix id="sharpenMatrix" order="3" preserveAlpha="true" divisor="1" kernelMatrix="0 0 0 0 1 0 0 0 0"></feConvolveMatrix>
+    </filter>
+  </svg>
+
+</body>
+</html>
