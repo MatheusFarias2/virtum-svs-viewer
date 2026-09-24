@@ -1,4 +1,4 @@
-# Publicação no Vercel · Virtum SVS Viewer v0.5.2.1
+# Publicação no Vercel · Virtum SVS Viewer v0.5.2.2
 
 Este pacote já está preparado para publicação como projeto Vite estático no Vercel.
 
@@ -32,7 +32,7 @@ https://SEU-PROJETO.vercel.app/health.txt
 Deve aparecer:
 
 ```text
-Virtum SVS Viewer v0.5.2.1
+Virtum SVS Viewer v0.5.2.2
 status=ok
 build=vercel-ready
 ```

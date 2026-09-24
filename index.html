@@ -19,7 +19,7 @@
         <img src="./assets/icon.svg" alt="" width="30" height="30" />
         <div class="brand-copy">
           <strong>Virtum SVS Viewer</strong>
-          <span>v0.5.2.1 · Mobile Memory Fix</span>
+          <span>v0.5.2.2 · Mobile Compatibility</span>
         </div>
       </div>
 
@@ -472,6 +472,9 @@
         <div><dt>Cache / fila</dt><dd id="startupDiagCache">—</dd></div>
         <div><dt>Modo de memória</dt><dd id="startupDiagMemory">—</dd></div>
         <div><dt>Compatibilidade</dt><dd id="startupDiagCompat">—</dd></div>
+        <div><dt>Fase atual</dt><dd id="startupDiagPhase">Em espera</dd></div>
+        <div><dt>Probe memória WASM</dt><dd id="startupDiagWasmProbe">não executado</dd></div>
+        <div class="startup-diag-error-row"><dt>Último erro</dt><dd id="startupDiagError">—</dd></div>
       </dl>
 
       <label class="select-row startup-profile-row" for="startupPerfProfileSelect">
@@ -488,11 +491,16 @@
         <input id="startupSafeModeToggle" type="checkbox" />
         <span>Modo seguro para tablet / pouca memória</span>
       </label>
-      <p class="startup-diag-help">No modo seguro o Viewer usa 1 worker, cache reduzido, fila curta e preload desligado. É o padrão em tablets e dispositivos com memória limitada.</p>
+      <p class="startup-diag-help">No modo seguro o Viewer usa 1 worker, fila 1, cache mínimo e sem retries do WASM em tablets. O Probe testa separadamente se o navegador aceita a memória compartilhada exigida pelo motor.</p>
 
+      <div class="startup-diagnostic-tools">
+        <button id="startupTestEngineBtn" class="btn primary" type="button">Testar motor</button>
+        <button id="startupProbeMemoryBtn" class="btn" type="button">Probe WASM</button>
+        <button id="startupCopyDiagBtn" class="btn" type="button">Copiar diagnóstico</button>
+      </div>
       <div class="dialog-actions startup-diag-actions">
-        <button id="startupRerunBenchmarkBtn" class="btn" type="button">Reavaliar</button>
-        <button id="startupDiagDoneBtn" class="btn primary" type="button">Fechar</button>
+        <button id="startupRerunBenchmarkBtn" class="btn" type="button">Reavaliar dispositivo</button>
+        <button id="startupDiagDoneBtn" class="btn" type="button">Fechar</button>
       </div>
     </form>
   </dialog>

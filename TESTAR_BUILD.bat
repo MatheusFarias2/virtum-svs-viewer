@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title Teste de build - Virtum SVS Viewer v0.5.2.1
+title Teste de build - Virtum SVS Viewer v0.5.2.2
 
 echo Limpando build anterior...
 if exist dist rmdir /s /q dist

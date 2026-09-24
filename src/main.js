@@ -1,6 +1,5 @@
 import OpenSeadragon from 'openseadragon';
 import { OpenSlide, DeepZoomGenerator } from '@computationalpathologygroup/openslide-js';
-import { jsPDF } from 'jspdf';
 import { createOpenSlideTileSource } from './openslide-source.js';
 
 const $ = (id) => document.getElementById(id);
@@ -111,6 +110,12 @@ const ui = {
   startupDiagCache: $('startupDiagCache'),
   startupDiagMemory: $('startupDiagMemory'),
   startupDiagCompat: $('startupDiagCompat'),
+  startupDiagPhase: $('startupDiagPhase'),
+  startupDiagError: $('startupDiagError'),
+  startupDiagWasmProbe: $('startupDiagWasmProbe'),
+  startupTestEngineBtn: $('startupTestEngineBtn'),
+  startupProbeMemoryBtn: $('startupProbeMemoryBtn'),
+  startupCopyDiagBtn: $('startupCopyDiagBtn'),
   startupPerfProfileSelect: $('startupPerfProfileSelect'),
   startupSafeModeToggle: $('startupSafeModeToggle'),
   startupRerunBenchmarkBtn: $('startupRerunBenchmarkBtn'),
@@ -230,18 +235,22 @@ const SESSIONS_KEY = 'virtum-svs-sessions-v040';
 const LIBRARY_MAX_ITEMS = 40;
 const SESSION_MAX_ITEMS = 40;
 const LIBRARY_CATEGORIES = ['Histologia', 'Anatomia', 'Patologia', 'Outros'];
-const DEVICE_BENCHMARK_KEY = 'virtum-svs-device-benchmark-v0521';
+const DEVICE_BENCHMARK_KEY = 'virtum-svs-device-benchmark-v0522';
 const DEVICE_BENCHMARK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MEMORY_SAFE_CONFIG = {
   label: 'Mobile Safe',
   workerCount: 1,
-  brokerCacheBytes: 16 * 1024 * 1024,
+  blockSize: 256 * 1024,
+  brokerCacheBytes: 8 * 1024 * 1024,
   maxConcurrentReads: 1,
   readAhead: 0,
-  jobLimit: 2,
+  jobLimit: 1,
   preload: false,
-  tileCacheCount: 40,
+  tileCacheCount: 24,
 };
+const WASM_UPSTREAM_INITIAL_PAGES = 256; // 16 MiB
+const WASM_UPSTREAM_MAX_PAGES = 32768;   // 2 GiB
+const WASM_REDUCED_MAX_PAGES = 8192;     // 512 MiB · apenas diagnóstico
 
 const PERFORMANCE_PROFILES = {
   auto: { label: 'Automático', jobLimit: 6, preload: false, tileCacheCount: 160 },
@@ -315,6 +324,9 @@ const state = {
   memorySafeMode: false,
   memorySafeUserSet: false,
   memoryRecoveryAttempted: false,
+  startupPhase: 'Em espera',
+  lastEngineError: '',
+  wasmMemoryProbe: null,
   tileRequested: 0,
   tileLoadedCount: 0,
   tileFailedCount: 0,
@@ -1722,6 +1734,7 @@ function engineSettingsForCurrentMode() {
   if (state.memorySafeMode) {
     return {
       workerCount: MEMORY_SAFE_CONFIG.workerCount,
+      blockSize: MEMORY_SAFE_CONFIG.blockSize,
       brokerCacheBytes: MEMORY_SAFE_CONFIG.brokerCacheBytes,
       maxConcurrentReads: MEMORY_SAFE_CONFIG.maxConcurrentReads,
       readAhead: MEMORY_SAFE_CONFIG.readAhead,
@@ -1732,6 +1745,7 @@ function engineSettingsForCurrentMode() {
   if (state.performanceProfile === 'auto' && benchmark) {
     return {
       workerCount: benchmark.workerCount,
+      blockSize: 1024 * 1024,
       brokerCacheBytes: benchmark.brokerCacheBytes,
       maxConcurrentReads: benchmark.maxConcurrentReads,
       readAhead: benchmark.readAhead,
@@ -1746,6 +1760,7 @@ function engineSettingsForCurrentMode() {
       ? { workerCount: 1, brokerCacheBytes: 32 * 1024 * 1024, maxConcurrentReads: 1, readAhead: 0 }
       : { workerCount: 2, brokerCacheBytes: 64 * 1024 * 1024, maxConcurrentReads: 2, readAhead: 1 };
 
+  manual.blockSize = 1024 * 1024;
   manual.workerCount = Math.min(manual.workerCount, logical >= 8 ? 3 : logical >= 4 ? 2 : 1);
   if (memory !== null && memory <= 4) {
     manual.workerCount = 1;
@@ -1768,6 +1783,144 @@ function getWorkerCount() {
   return engineSettingsForCurrentMode().workerCount;
 }
 
+function setStartupPhase(phase, error = '') {
+  state.startupPhase = phase || '—';
+  if (error) state.lastEngineError = String(error?.message || error || 'Falha desconhecida');
+  updateStartupDiagnostics();
+}
+
+function wasmProbeText(result = state.wasmMemoryProbe) {
+  if (!result) return 'não executado';
+  if (result.upstreamOk) return '2 GiB: OK · 512 MiB: OK';
+  if (result.reducedOk) return `2 GiB: FALHOU · 512 MiB: OK (${result.upstreamError || 'limite do navegador'})`;
+  return `2 GiB: FALHOU · 512 MiB: FALHOU (${result.reducedError || result.upstreamError || 'sem memória compartilhada'})`;
+}
+
+async function runWasmMemoryProbe({ notify = true } = {}) {
+  const result = {
+    testedAt: Date.now(),
+    upstreamOk: false,
+    reducedOk: false,
+    upstreamError: '',
+    reducedError: '',
+  };
+
+  setStartupPhase('Testando memória compartilhada WASM');
+  await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+  if (!window.crossOriginIsolated || typeof SharedArrayBuffer === 'undefined') {
+    result.upstreamError = 'SharedArrayBuffer indisponível / crossOriginIsolated=false';
+    result.reducedError = result.upstreamError;
+    state.wasmMemoryProbe = result;
+    setStartupPhase('Teste WASM concluído');
+    if (notify) showToast('Memória WASM compartilhada indisponível', 'error');
+    return result;
+  }
+
+  const tryMemory = (maximum, fieldOk, fieldError) => {
+    try {
+      let memory = new WebAssembly.Memory({
+        initial: WASM_UPSTREAM_INITIAL_PAGES,
+        maximum,
+        shared: true,
+      });
+      // Toca a primeira página para forçar a visão tipada e detectar falhas imediatas.
+      const view = new Uint8Array(memory.buffer, 0, 1);
+      view[0] = 0;
+      result[fieldOk] = true;
+      memory = null;
+    } catch (error) {
+      result[fieldError] = String(error?.message || error || 'falha de alocação');
+    }
+  };
+
+  // Primeiro tenta 512 MiB. Se isso já falhar, não arriscamos pedir o teto de 2 GiB.
+  tryMemory(WASM_REDUCED_MAX_PAGES, 'reducedOk', 'reducedError');
+  await new Promise((resolve) => window.setTimeout(resolve, 0));
+  if (result.reducedOk) {
+    tryMemory(WASM_UPSTREAM_MAX_PAGES, 'upstreamOk', 'upstreamError');
+  } else {
+    result.upstreamError = 'não testado: o limite de 512 MiB já falhou';
+  }
+
+  state.wasmMemoryProbe = result;
+  setStartupPhase('Teste WASM concluído');
+  if (notify) {
+    if (result.upstreamOk) showToast('Memória WASM de 2 GiB aceita pelo navegador', 'success');
+    else if (result.reducedOk) showToast('2 GiB falhou; 512 MiB foi aceito', 'info');
+    else showToast('O navegador rejeitou a memória WASM compartilhada', 'error');
+  }
+  return result;
+}
+
+function startupDiagnosticText() {
+  const engine = engineSettingsForCurrentMode();
+  const benchmark = state.deviceBenchmark;
+  return [
+    'Virtum SVS Viewer v0.5.2.2 · Mobile Compatibility',
+    `Data: ${new Date().toLocaleString('pt-BR')}`,
+    `UA: ${navigator.userAgent || '—'}`,
+    `Móvel/tablet: ${detectMobileDevice()}`,
+    `HTTPS/contexto seguro: ${window.isSecureContext}`,
+    `crossOriginIsolated: ${window.crossOriginIsolated}`,
+    `SharedArrayBuffer: ${typeof SharedArrayBuffer !== 'undefined'}`,
+    `WebAssembly: ${typeof WebAssembly !== 'undefined'}`,
+    `Worker: ${typeof Worker !== 'undefined'}`,
+    `CPU: ${navigator.hardwareConcurrency || 'não informado'}`,
+    `RAM deviceMemory: ${navigator.deviceMemory ?? 'não informada'}`,
+    `Benchmark: ${benchmark ? `${benchmark.cpuMs.toFixed(1)} ms · score ${benchmark.score.toFixed(1)} · ${benchmark.tier}` : 'não executado'}`,
+    `Modo seguro: ${state.memorySafeMode}`,
+    `Workers: ${engine.workerCount}`,
+    `Block size: ${Math.round((engine.blockSize || 1024 * 1024) / 1024)} KiB`,
+    `Broker cache: ${Math.round(engine.brokerCacheBytes / (1024 * 1024))} MiB`,
+    `Fase: ${state.startupPhase}`,
+    `Probe WASM: ${wasmProbeText()}`,
+    `Último erro: ${state.lastEngineError || '—'}`,
+  ].join('\n');
+}
+
+async function copyStartupDiagnostics() {
+  const text = startupDiagnosticText();
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('Diagnóstico copiado', 'success');
+  } catch (_) {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    try { document.execCommand('copy'); showToast('Diagnóstico copiado', 'success'); }
+    catch (_) { showToast('Não foi possível copiar o diagnóstico', 'error'); }
+    area.remove();
+  }
+}
+
+async function testOpenSlideEngine() {
+  if (state.ready && state.openslide) {
+    setStartupPhase('Motor já inicializado');
+    showToast('OpenSlide já está pronto', 'success');
+    return;
+  }
+  state.lastEngineError = '';
+  if (ui.startupTestEngineBtn) ui.startupTestEngineBtn.disabled = true;
+  try {
+    setStartupPhase('Teste do motor · iniciando');
+    await ensureOpenSlide();
+    setStartupPhase('Motor OpenSlide pronto');
+    showToast('Motor OpenSlide iniciou sem abrir lâmina', 'success');
+  } catch (error) {
+    state.lastEngineError = explainInitError(error);
+    setStartupPhase('Falha no motor', state.lastEngineError);
+    showToast('Teste do motor falhou', 'error');
+  } finally {
+    if (ui.startupTestEngineBtn) ui.startupTestEngineBtn.disabled = false;
+    updateStartupDiagnostics();
+  }
+}
+
 async function initializeAttempt({ ioEnabled, label }) {
   const workerUrl = new URL('@computationalpathologygroup/openslide-js/worker', import.meta.url);
   const wasmJsUrl = new URL('@computationalpathologygroup/openslide-js/wasm/openslide.js', import.meta.url).href;
@@ -1784,11 +1937,13 @@ async function initializeAttempt({ ioEnabled, label }) {
 
   let wasmBinary;
   try {
+    setStartupPhase('Baixando OpenSlide WASM');
     const response = await fetch(wasmBinaryUrl);
     if (!response.ok) {
       throw new Error(`WASM HTTP ${response.status}: ${response.statusText || 'falha ao carregar'}`);
     }
     wasmBinary = await response.arrayBuffer();
+    setStartupPhase('WASM carregado · preparando worker');
   } catch (error) {
     throw new Error(`Não foi possível carregar o OpenSlide WASM: ${error?.message || error}`);
   }
@@ -1797,6 +1952,7 @@ async function initializeAttempt({ ioEnabled, label }) {
   state.engineWorkerCount = engineSettings.workerCount;
   state.engineBrokerCacheBytes = engineSettings.brokerCacheBytes;
 
+  setStartupPhase(`Inicializando OpenSlide · ${label}`);
   const initializePromise = OpenSlide.initialize({
     workerCount: engineSettings.workerCount,
     workerFactory,
@@ -1805,6 +1961,7 @@ async function initializeAttempt({ ioEnabled, label }) {
     io: ioEnabled
       ? {
           enabled: true,
+          blockSize: engineSettings.blockSize || 1024 * 1024,
           brokerCacheBytes: engineSettings.brokerCacheBytes,
           maxConcurrentReads: engineSettings.maxConcurrentReads,
           readAhead: engineSettings.readAhead,
@@ -1841,11 +1998,11 @@ function explainInitError(error) {
   if (lower.includes('worker') && (lower.includes('load') || lower.includes('module'))) {
     return `O Web Worker do OpenSlide não carregou. ${raw}`;
   }
+  if (lower.includes('memory') || lower.includes('out of') || lower.includes('allocation') || lower.includes('oom')) {
+    return `O navegador recusou a memória necessária ao OpenSlide/WASM. ${raw}`;
+  }
   if (lower.includes('wasm') || lower.includes('webassembly')) {
     return `O WebAssembly do OpenSlide não carregou. ${raw}`;
-  }
-  if (lower.includes('memory') || lower.includes('out of')) {
-    return `Memória insuficiente para iniciar o OpenSlide. ${raw}`;
   }
   return raw;
 }
@@ -1923,7 +2080,19 @@ async function ensureOpenSlide() {
       const safetyText = state.memorySafeMode ? ' · Modo seguro' : '';
       setBusy(true, 'Preparando o microscópio', `Inicializando o motor local de lâminas${safetyText}…`);
 
-      try {
+      const mobileSingleAttempt = state.memorySafeMode && detectMobileDevice();
+      if (mobileSingleAttempt) {
+        // Em tablet não repetimos a inicialização WASM: cada tentativa pode manter
+        // pressão de memória até o GC do navegador agir. Um único worker, sem broker.
+        setBusy(true, 'Modo móvel seguro', 'Uma única inicialização do OpenSlide · 1 worker · sem retry…');
+        setStartupPhase('Inicialização móvel única');
+        try {
+          state.openslide = await tryLocal('Inicialização móvel segura');
+        } catch (mobileError) {
+          state.lastEngineError = explainInitError(mobileError);
+          throw mobileError;
+        }
+      } else try {
         state.openslide = await tryLocal();
       } catch (error) {
         firstError = error;
@@ -1970,6 +2139,8 @@ async function ensureOpenSlide() {
       const safeLabel = state.memorySafeMode ? ' · memória segura' : '';
       setEngineState(`OpenSlide ${version}${modeLabel}${safeLabel}`, 'ready');
       setStatus(`Motor pronto · OpenSlide ${version}${modeLabel}${safeLabel}`);
+      state.lastEngineError = '';
+      setStartupPhase('Motor OpenSlide pronto');
       updateDiagnostics();
       return state.openslide;
     } catch (error) {
@@ -1978,6 +2149,8 @@ async function ensureOpenSlide() {
       state.openslide = null;
       state.engineMode = 'error';
       const message = explainInitError(error);
+      state.lastEngineError = message;
+      setStartupPhase('Falha ao inicializar OpenSlide', message);
       const diag = diagnosticSummary();
       setEngineState('Falha ao iniciar', 'error');
       setStatus(`${message} · ${diag}`);
@@ -2023,21 +2196,26 @@ async function openSvs(file) {
   hideLibrary();
   state.opening = true;
   state.currentFile = file;
+  state.lastEngineError = '';
+  setStartupPhase('Arquivo .SVS recebido');
   restoreEmptyStateText();
 
   try {
     if (!state.ready || !state.openslide) {
       setBusy(true, 'Preparando o microscópio', 'O motor será iniciado somente agora…');
+      setStartupPhase('Preparando motor OpenSlide');
       await ensureOpenSlide();
     }
 
     setBusy(true, 'Abrindo lâmina', `${file.name} · ${formatBytes(file.size)}`);
     setStatus('Lendo cabeçalho da lâmina…');
+    setStartupPhase('Abrindo cabeçalho da lâmina');
 
     await closeCurrentSlide();
 
     const slide = await state.openslide.open(file);
     state.slides.push(slide);
+    setStartupPhase('Criando pirâmide Deep Zoom');
     state.generators = [new DeepZoomGenerator(slide)];
 
     updateMetadata(file, slide);
@@ -2067,12 +2245,15 @@ async function openSvs(file) {
     state.tileErrors = 0;
     state.rotation = 0;
     state.awaitingFirstTile = true;
+    setStartupPhase('Aguardando primeiro tile');
     viewer.open(tileSource);
     ui.emptyState.hidden = true;
     setViewerControlsEnabled(true);
     setStatus(`${file.name} · preparando visualização…`);
     armFirstTileTimeout();
   } catch (error) {
+    state.lastEngineError = String(error?.message || error || 'Falha ao abrir SVS');
+    setStartupPhase('Falha ao abrir lâmina', state.lastEngineError);
     console.error('Falha ao abrir a lâmina:', error);
     state.awaitingFirstTile = false;
     await closeCurrentSlide();
@@ -2233,10 +2414,10 @@ function updateDiagnostics() {
   const cacheMB = Math.round((state.engineBrokerCacheBytes || engineSettings.brokerCacheBytes) / (1024 * 1024));
   const recommendedWorkers = state.engineWorkerCount || engineSettings.workerCount;
   const compareActive = hasCompareSlide();
-  const cacheFloor = state.memorySafeMode ? 24 : 48;
+  const cacheFloor = state.memorySafeMode ? 16 : 48;
   const cacheCount = Math.max(cacheFloor, Math.round((cfg.tileCacheCount || 160) * (compareActive ? 0.65 : 1)));
-  const baseJobLimit = Math.max(2, Math.round((cfg.jobLimit || 6) * (compareActive ? 0.68 : 1)));
-  const activeJobLimit = Math.max(2, Math.round(baseJobLimit * state.runtimeThrottle));
+  const baseJobLimit = Math.max(state.memorySafeMode ? 1 : 2, Math.round((cfg.jobLimit || 6) * (compareActive ? 0.68 : 1)));
+  const activeJobLimit = Math.max(state.memorySafeMode ? 1 : 2, Math.round(baseJobLimit * state.runtimeThrottle));
   const preload = !state.memorySafeMode && !detectMobileDevice() && (cfg.preload || state.highDefinition) && !(compareActive && tier.label === 'Leve');
   let cachedTiles = 0;
   try { cachedTiles += Number(viewer.tileCache?.numTilesLoaded?.() || 0); } catch (_) {}
@@ -2304,7 +2485,7 @@ function updateStartupDiagnostics() {
   const memory = benchmark?.memory ?? navigator.deviceMemory ?? null;
   const cfg = currentProfileConfig();
   const engine = engineSettingsForCurrentMode();
-  const cacheFloor = state.memorySafeMode ? 24 : 48;
+  const cacheFloor = state.memorySafeMode ? 16 : 48;
   const cacheCount = Math.max(cacheFloor, Math.round(cfg.tileCacheCount || 160));
   const profileKey = effectiveProfileKey();
   const profileLabel = PERFORMANCE_PROFILES[profileKey]?.label || profileKey;
@@ -2327,7 +2508,7 @@ function updateStartupDiagnostics() {
         : `Manual · ${PERFORMANCE_PROFILES[state.performanceProfile]?.label || state.performanceProfile}`;
   }
   if (ui.startupDiagWorkers) {
-    ui.startupDiagWorkers.textContent = `${engine.workerCount} · broker ${Math.round(engine.brokerCacheBytes / (1024 * 1024))} MB`;
+    ui.startupDiagWorkers.textContent = `${engine.workerCount} · broker ${Math.round(engine.brokerCacheBytes / (1024 * 1024))} MB · bloco ${Math.round((engine.blockSize || 1024 * 1024) / 1024)} KiB`;
   }
   if (ui.startupDiagCache) {
     ui.startupDiagCache.textContent = `${cacheCount} tiles · fila ${cfg.jobLimit} · preload ${state.memorySafeMode ? 'off' : (cfg.preload ? 'ativo' : 'off')}`;
@@ -2338,13 +2519,19 @@ function updateStartupDiagnostics() {
   if (ui.startupDiagCompat) {
     ui.startupDiagCompat.textContent = compatibilityProblem || 'HTTPS / isolamento / WASM disponíveis';
   }
+  if (ui.startupDiagPhase) ui.startupDiagPhase.textContent = state.startupPhase || '—';
+  if (ui.startupDiagError) {
+    ui.startupDiagError.textContent = state.lastEngineError || '—';
+    ui.startupDiagError.title = state.lastEngineError || '';
+  }
+  if (ui.startupDiagWasmProbe) ui.startupDiagWasmProbe.textContent = wasmProbeText();
   if (ui.startupPerfProfileSelect) ui.startupPerfProfileSelect.value = state.performanceProfile;
   if (ui.startupSafeModeToggle) ui.startupSafeModeToggle.checked = state.memorySafeMode;
 
   if (ui.startupSafetyNotice) {
     if (state.memorySafeMode) {
       ui.startupSafetyNotice.dataset.state = 'safe';
-      ui.startupSafetyNotice.textContent = 'Proteção de memória ativa. O OpenSlide será iniciado com apenas 1 worker e caches reduzidos.';
+      ui.startupSafetyNotice.textContent = 'Proteção de memória ativa. Em tablet o OpenSlide fará uma única tentativa com 1 worker, sem retries e com caches mínimos.';
     } else if (isLikelyConstrainedDevice()) {
       ui.startupSafetyNotice.dataset.state = 'warning';
       ui.startupSafetyNotice.textContent = 'Este dispositivo parece móvel ou limitado. Recomenda-se manter o Modo seguro ativado antes de abrir a primeira lâmina.';
@@ -2433,7 +2620,7 @@ function applyPerformanceProfile(silent = false) {
   const minimumJobs = state.memorySafeMode ? 1 : 2;
   const baseJobLimit = Math.max(minimumJobs, Math.round(cfg.jobLimit * (compareActive ? 0.68 : 1)));
   const jobLimit = Math.max(minimumJobs, Math.round(baseJobLimit * state.runtimeThrottle));
-  const cacheFloor = state.memorySafeMode ? 24 : 48;
+  const cacheFloor = state.memorySafeMode ? 16 : 48;
   const cacheCount = Math.max(cacheFloor, Math.round(cfg.tileCacheCount * (compareActive ? 0.65 : 1)));
   const preload = !state.memorySafeMode && !detectMobileDevice() && (cfg.preload || state.highDefinition) && !(compareActive && state.deviceBenchmark?.tier === 'lite');
 
@@ -4259,7 +4446,7 @@ function getReportHtml({ imageData = '' } = {}) {
   const lessonSection = opts.includeLesson && lessonRows ? `<section><h2>${escapeHtml(state.lessonTitle || 'Sequência do Modo Aula')}</h2><table><thead><tr><th>Etapa</th><th>Título</th><th>Observação</th></tr></thead><tbody>${lessonRows}</tbody></table></section>` : '';
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${escapeHtml(identity.title)}</title><style>
   *{box-sizing:border-box}body{font:14px Inter,system-ui,sans-serif;margin:0;color:#1f2530;background:#eef1f5}.page{max-width:920px;margin:24px auto;background:white;box-shadow:0 12px 42px #0002}.head{padding:30px 38px 24px;background:#151820;color:#fff;border-top:7px solid #d92335}.head h1{margin:0;font-size:27px}.head p{margin:6px 0 0;color:#b9c0ca}.content{padding:28px 38px 38px}.identity{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:0 0 20px}.identity div,.meta div{padding:10px 12px;background:#f4f6f8;border-radius:8px}.identity b,.meta b{display:block;font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px}.meta{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:0 0 26px}.meta div{font-size:12px}.shot{display:block;width:100%;max-height:520px;object-fit:contain;border:1px solid #d8dde4;border-radius:10px;background:#f3f4f6}h2{font-size:16px;margin:28px 0 10px}table{border-collapse:collapse;width:100%;margin:0 0 20px}th,td{border-bottom:1px solid #e0e4ea;padding:9px 8px;text-align:left;vertical-align:top}th{font-size:10px;color:#667085;text-transform:uppercase}.num{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;color:white;font-weight:800}.foot{padding:16px 38px;border-top:1px solid #e2e6eb;color:#737b87;font-size:10px;display:flex;justify-content:space-between}.no-print{padding:0 38px 30px}@media(max-width:700px){.page{margin:0}.identity,.meta{grid-template-columns:1fr 1fr}.content,.head,.foot{padding-left:20px;padding-right:20px}}@media print{body{background:white}.page{max-width:none;margin:0;box-shadow:none}.no-print{display:none}@page{size:A4;margin:12mm}}
-  </style></head><body><article class="page"><header class="head"><h1>${escapeHtml(identity.title)}</h1><p>Virtum SVS Viewer · relatório local · v0.5.2.1</p></header><div class="content"><div class="identity"><div><b>Professor(a)</b>${escapeHtml(identity.professor || '—')}</div><div><b>Aluno(a)</b>${escapeHtml(identity.student || '—')}</div><div><b>Instituição / disciplina</b>${escapeHtml(identity.institution || '—')}</div><div><b>Sessão / categoria</b>${escapeHtml([identity.session, identity.category].filter(Boolean).join(' · ') || '—')}</div></div><div class="meta"><div><b>Lâmina</b>${escapeHtml(payload.slide.name)}</div><div><b>Dimensões</b>${escapeHtml(payload.slide.width)} × ${escapeHtml(payload.slide.height)} px</div><div><b>Ampliação</b>${state.objectivePower ? `${escapeHtml(state.objectivePower)}×` : 'não informado'}</div><div><b>MPP</b>${payload.slide.mppX ? `${escapeHtml(payload.slide.mppX)} µm/px` : 'não informado'}</div></div>${imageSection}${measurementSection}${annotationSection}${lessonSection}</div><footer class="foot"><span>Gerado pelo Virtum SVS Viewer</span><span>${escapeHtml(new Date().toLocaleString('pt-BR'))}</span></footer><div class="no-print"><button onclick="window.print()">Imprimir / Salvar em PDF</button></div></article></body></html>`;
+  </style></head><body><article class="page"><header class="head"><h1>${escapeHtml(identity.title)}</h1><p>Virtum SVS Viewer · relatório local · v0.5.2.2</p></header><div class="content"><div class="identity"><div><b>Professor(a)</b>${escapeHtml(identity.professor || '—')}</div><div><b>Aluno(a)</b>${escapeHtml(identity.student || '—')}</div><div><b>Instituição / disciplina</b>${escapeHtml(identity.institution || '—')}</div><div><b>Sessão / categoria</b>${escapeHtml([identity.session, identity.category].filter(Boolean).join(' · ') || '—')}</div></div><div class="meta"><div><b>Lâmina</b>${escapeHtml(payload.slide.name)}</div><div><b>Dimensões</b>${escapeHtml(payload.slide.width)} × ${escapeHtml(payload.slide.height)} px</div><div><b>Ampliação</b>${state.objectivePower ? `${escapeHtml(state.objectivePower)}×` : 'não informado'}</div><div><b>MPP</b>${payload.slide.mppX ? `${escapeHtml(payload.slide.mppX)} µm/px` : 'não informado'}</div></div>${imageSection}${measurementSection}${annotationSection}${lessonSection}</div><footer class="foot"><span>Gerado pelo Virtum SVS Viewer</span><span>${escapeHtml(new Date().toLocaleString('pt-BR'))}</span></footer><div class="no-print"><button onclick="window.print()">Imprimir / Salvar em PDF</button></div></article></body></html>`;
 }
 
 async function exportHtmlReport() {
@@ -4340,12 +4527,14 @@ async function exportPdfReport() {
   saveReportPreferences();
   closeReportDialog();
   try {
-    setBusy(true, 'Gerando PDF', 'Montando captura, legenda e dados da lâmina…');
+    setBusy(true, 'Gerando PDF', 'Carregando módulo de PDF…');
     setStatus('Gerando PDF profissional…');
+    const { jsPDF } = await import('jspdf');
+    setBusy(true, 'Gerando PDF', 'Montando captura, legenda e dados da lâmina…');
     const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
     const pageWidth = pdf.internal.pageSize.getWidth();
     const contentWidth = pageWidth - 28;
-    pdfPageHeader(pdf, identity.title, 'Virtum SVS Viewer · Reports & Export · v0.5.2.1');
+    pdfPageHeader(pdf, identity.title, 'Virtum SVS Viewer · Reports & Export · v0.5.2.2');
     let y = 31;
 
     const identityRows = [
@@ -4745,6 +4934,7 @@ viewer.addHandler('tile-loaded', () => {
     clearFirstTileTimer();
     setBusy(false);
     redrawOverlays();
+    setStartupPhase('Lâmina pronta');
     if (state.currentFile) {
       setStatus(`${state.currentFile.name} · lâmina pronta · ${qualitySummaryText(screenPixelsPerImagePixel())}`);
     }
@@ -4763,6 +4953,8 @@ viewer.addHandler('open-failed', (event) => {
   clearFirstTileTimer();
   setBusy(false);
   console.error('OpenSeadragon não conseguiu abrir a fonte:', event);
+  state.lastEngineError = event?.message || event?.errorMsg || 'Falha ao preparar a pirâmide de zoom da lâmina.';
+  setStartupPhase('Falha no Deep Zoom', state.lastEngineError);
   setStatus('Falha ao preparar a pirâmide de zoom da lâmina.');
 });
 
@@ -4846,6 +5038,9 @@ ui.libraryDiagBtn.addEventListener('click', openStartupDiagnostics);
 ui.deviceDiagBtn.addEventListener('click', openStartupDiagnostics);
 ui.startupDiagClose.addEventListener('click', closeStartupDiagnostics);
 ui.startupDiagDoneBtn.addEventListener('click', closeStartupDiagnostics);
+ui.startupTestEngineBtn?.addEventListener('click', testOpenSlideEngine);
+ui.startupProbeMemoryBtn?.addEventListener('click', () => runWasmMemoryProbe({ notify: true }));
+ui.startupCopyDiagBtn?.addEventListener('click', copyStartupDiagnostics);
 ui.startupDiagDialog.addEventListener('cancel', (event) => { event.preventDefault(); closeStartupDiagnostics(); });
 ui.compareBtn.addEventListener('click', openComparePicker);
 ui.compareOpenBtn.addEventListener('click', openComparePicker);

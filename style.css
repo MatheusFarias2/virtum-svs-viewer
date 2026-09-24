@@ -2051,7 +2051,7 @@ summary:focus-visible,
   .report-field-wide { grid-column: auto; }
 }
 
-/* v0.5.2.1 · Mobile Memory Fix */
+/* v0.5.2.1 · Mobile Memory Fix (base) */
 .library-hero-actions {
   position: relative;
   z-index: 1;
@@ -2135,4 +2135,21 @@ summary:focus-visible,
   .startup-diag-list div { grid-template-columns: 1fr; gap: 3px; }
   .startup-diag-list dd { text-align: left; }
   .startup-diag-actions { display: grid; grid-template-columns: 1fr 1fr; }
+}
+
+
+/* v0.5.2.2 · Mobile Compatibility diagnostics */
+.startup-diagnostic-tools {
+  display: grid;
+  grid-template-columns: 1.15fr 1fr 1fr;
+  gap: 8px;
+  margin-top: 12px;
+}
+.startup-diag-error-row dd {
+  max-width: 330px;
+  overflow-wrap: anywhere;
+  color: #f0a0a8;
+}
+@media (max-width: 620px) {
+  .startup-diagnostic-tools { grid-template-columns: 1fr; }
 }
