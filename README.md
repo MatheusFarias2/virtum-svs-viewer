@@ -1,65 +1,30 @@
-# Virtum SVS Viewer v0.5.3.1 · Mobile Fast Start
+# Virtum SVS Viewer v0.5.3.2 · Adaptive Fast Start
 
-O v0.5.3 abriu a lâmina no tablet, mas o perfil de compatibilidade era propositalmente
-ultraconservador. Esta revisão mantém a proteção de memória e recupera desempenho.
+Atualização focada em reduzir o tempo até a primeira imagem em tablets, Chromebooks e PCs de baixo consumo sem voltar aos erros de memória.
 
-## O que mudou no mobile
+## Novidades
 
-- continua usando **1 worker de decodificação**, evitando voltar ao erro de memória;
-- ativa o **I/O broker compartilhado** do `openslide-js`; o broker é um worker leve e
-  não carrega outra instância do WASM;
-- blocos de leitura passam de 256 KiB para **1 MiB**;
-- cache do broker passa de 8 MiB para **24 MiB**;
-- `readAhead = 1` e até 2 leituras em voo;
-- Deep Zoom passa para **254 px + overlap 1**, totalizando 256 px por bloco, alinhado
-  à recomendação de desempenho do Deep Zoom;
-- fila visual sobe de 1 para **2 jobs** e cache visual para **24 tiles**;
-- OpenSeadragon usa `immediateRender` no mobile e `minPixelRatio = 1.25`, evitando
-  buscar uma cascata desnecessária de níveis intermediários;
-- blend de tiles fica em 0 no mobile;
-- mini-mapa continua desligado no tablet;
-- Compare e Alta definição continuam bloqueados em Modo seguro;
-- atualizações de diagnóstico e redesenho das anotações agora são agrupadas por
-  frame/intervalo, evitando trabalho de DOM a cada tile e a cada evento de animação.
+- Perfil **Low Power** específico para Chromebook e hardware modesto.
+- Chromebook não entra mais automaticamente no modo de memória ultraconservador apenas por não informar `deviceMemory`.
+- Low Power: 1 worker WASM, blocos de 2 MiB, broker 32 MiB, 2 leituras simultâneas, read-ahead 2, fila visual 2 e cache visual 32 tiles.
+- Mobile mantém o caminho seguro e rápido da v0.5.3.1.
+- Navigator desligado e `immediateRender` ativado também em dispositivos Low Power.
+- `minPixelRatio` otimizado para priorizar a primeira visualização em hardware restrito.
+- Benchmark passa a distinguir **Mobile / Low Power / Balanced / Strong**.
+- Cronometragem do tempo total até a primeira imagem no diagnóstico e status.
+- Cache de benchmark versionado novamente para forçar uma nova avaliação na primeira execução.
 
-## Por que isso deve ser mais rápido
+## Meta desta versão
 
-A v0.5.3 usava I/O independente, blocos de 256 KiB, tiles de 128 px e fila 1. Isso
-minimizava memória, mas multiplicava leituras, tiles e chamadas entre JavaScript e
-WASM. O novo perfil mantém um único decoder, porém usa o broker compartilhado do
-OpenSlide JS para cachear e antecipar leituras locais.
+Usar a mesma lâmina de teste para comparar o tempo até a primeira imagem. O objetivo principal é diminuir especialmente o tempo em Chromebook sem aumentar agressivamente workers ou memória.
 
-## Mobile WASM
-
-A preferência pelo build móvel de 512 MiB continua preservada. Se existir:
-
-```text
-public/wasm-mobile/manifest.json
-public/wasm-mobile/openslide.js
-public/wasm-mobile/openslide.wasm
-```
-
-o Viewer usa esse engine no tablet. Caso contrário, usa o engine padrão como fallback.
-
-## Teste recomendado
-
-Abra a mesma lâmina usada na v0.5.3 e cronometre até a primeira imagem aparecer.
-Depois abra **Biblioteca → Diagnóstico** e copie: fase, primeiro tile, decode, bitmap,
-engine, bloco de I/O e broker cache. Esses números permitem calibrar a próxima etapa.
-
-## Executar localmente
+## Execução local
 
 ```bash
 npm install
 npm run dev
 ```
 
-Build de produção:
+## Vercel
 
-```bash
-npm run build:vercel
-npm run preview
-```
-
-A configuração de Vercel e os headers COOP/COEP continuam preservados. O `.SVS`
-permanece no dispositivo do usuário.
+O projeto continua Vercel-ready e mantém os headers necessários para OpenSlide/WASM.

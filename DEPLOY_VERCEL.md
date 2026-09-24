@@ -1,4 +1,4 @@
-# Publicação no Vercel · Virtum SVS Viewer v0.5.3.1
+# Publicação no Vercel · Virtum SVS Viewer v0.5.3.2
 
 Este pacote já está preparado para publicação como projeto Vite estático no Vercel.
 
@@ -32,7 +32,7 @@ https://SEU-PROJETO.vercel.app/health.txt
 Deve aparecer:
 
 ```text
-Virtum SVS Viewer v0.5.3.1
+Virtum SVS Viewer v0.5.3.2
 status=ok
 build=vercel-ready
 ```
@@ -67,7 +67,7 @@ A hospedagem contém somente o aplicativo. Ao selecionar uma lâmina `.SVS`, o a
 
 Com o repositório ligado ao Vercel, cada `push` para a branch de produção pode gerar uma nova implantação automaticamente. Para uma nova versão do Viewer, substitua/atualize os arquivos do projeto e envie o commit.
 
-## Mobile WASM v0.5.3.1
+## Mobile WASM v0.5.3.2
 
 A aplicação pode ser publicada antes de gerar o WASM móvel; nesse caso ela usa o
 engine padrão automaticamente.
