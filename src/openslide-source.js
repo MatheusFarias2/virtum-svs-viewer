@@ -47,7 +47,8 @@ export function createOpenSlideTileSource(generators, slideName, hooks = {}) {
 
   ts.downloadTileStart = (context) => {
     const { level, x, y } = context.tile;
-    hooks.onTileStart?.({ level, x, y });
+    const startedAt = performance.now();
+    hooks.onTileStart?.({ level, x, y, startedAt });
     const generator = generators[roundRobin++ % generators.length];
     const controller = new AbortController();
     controllers.set(context, controller);
@@ -57,13 +58,25 @@ export function createOpenSlideTileSource(generators, slideName, hooks = {}) {
         controllers.delete(context);
         if (aborted.has(context)) return;
 
+        const decodedAt = performance.now();
+        const decodeMs = decodedAt - startedAt;
+        hooks.onTileDecoded?.({ level, x, y, decodeMs, decodedAt, width: imageData?.width, height: imageData?.height });
+
+        const bitmapStartedAt = performance.now();
         const bitmap = await createImageBitmap(imageData);
         if (aborted.has(context)) {
           bitmap.close();
           return;
         }
 
-        hooks.onTileLoaded?.({ level, x, y });
+        const finishedAt = performance.now();
+        hooks.onTileLoaded?.({
+          level, x, y,
+          decodeMs,
+          bitmapMs: finishedAt - bitmapStartedAt,
+          totalMs: finishedAt - startedAt,
+          finishedAt,
+        });
         context.finish(bitmap, null, 'imageBitmap');
       })
       .catch((error) => {

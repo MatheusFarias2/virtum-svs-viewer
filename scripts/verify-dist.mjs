@@ -25,6 +25,20 @@ const assets = readdirSync(assetsDir, { recursive: true });
 const jsAssets = assets.filter((name) => String(name).endsWith('.js'));
 if (jsAssets.length === 0) fail('Nenhum bundle JavaScript foi encontrado em dist/assets.');
 
+
+const mobileManifest = join(dist, 'wasm-mobile', 'manifest.json');
+if (existsSync(mobileManifest)) {
+  const mobileDir = join(dist, 'wasm-mobile');
+  const mobileJs = join(mobileDir, 'openslide.js');
+  const mobileWasm = join(mobileDir, 'openslide.wasm');
+  if (!existsSync(mobileJs) || !existsSync(mobileWasm)) {
+    fail('manifest do Mobile WASM existe, mas openslide.js/openslide.wasm não foram encontrados no dist.');
+  }
+  console.log('[Virtum deploy check] Mobile WASM detectado e incluído no dist.');
+} else {
+  console.log('[Virtum deploy check] Mobile WASM ainda não gerado; fallback padrão permanecerá ativo.');
+}
+
 const totalFiles = assets.length + 1;
 console.log(`[Virtum deploy check] OK · ${totalFiles} arquivos verificados no dist.`);
 console.log('[Virtum deploy check] O isolamento COOP/COEP é aplicado pelo vercel.json em produção.');

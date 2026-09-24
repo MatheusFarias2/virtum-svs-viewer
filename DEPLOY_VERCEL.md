@@ -1,4 +1,4 @@
-# Publicação no Vercel · Virtum SVS Viewer v0.5.2.2
+# Publicação no Vercel · Virtum SVS Viewer v0.5.3
 
 Este pacote já está preparado para publicação como projeto Vite estático no Vercel.
 
@@ -32,7 +32,7 @@ https://SEU-PROJETO.vercel.app/health.txt
 Deve aparecer:
 
 ```text
-Virtum SVS Viewer v0.5.2.2
+Virtum SVS Viewer v0.5.3
 status=ok
 build=vercel-ready
 ```
@@ -66,3 +66,19 @@ A hospedagem contém somente o aplicativo. Ao selecionar uma lâmina `.SVS`, o a
 ## Atualizações futuras
 
 Com o repositório ligado ao Vercel, cada `push` para a branch de produção pode gerar uma nova implantação automaticamente. Para uma nova versão do Viewer, substitua/atualize os arquivos do projeto e envie o commit.
+
+## Mobile WASM v0.5.3
+
+A aplicação pode ser publicada antes de gerar o WASM móvel; nesse caso ela usa o
+engine padrão automaticamente.
+
+Para ativar o engine móvel de 512 MiB, depois de subir este projeto ao GitHub:
+
+1. GitHub → **Actions**;
+2. **Build Mobile OpenSlide WASM**;
+3. **Run workflow**;
+4. aguarde o commit automático em `public/wasm-mobile/`;
+5. a Vercel fará um novo deploy se a integração Git estiver ativa.
+
+Após o deploy, abra `/wasm-mobile/manifest.json`. Ele deve mostrar
+`"ready": true` e `"maximumMemoryMiB": 512`.

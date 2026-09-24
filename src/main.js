@@ -109,6 +109,7 @@ const ui = {
   startupDiagWorkers: $('startupDiagWorkers'),
   startupDiagCache: $('startupDiagCache'),
   startupDiagMemory: $('startupDiagMemory'),
+  startupDiagEngine: $('startupDiagEngine'),
   startupDiagCompat: $('startupDiagCompat'),
   startupDiagPhase: $('startupDiagPhase'),
   startupDiagError: $('startupDiagError'),
@@ -222,7 +223,11 @@ const panelPages = [...document.querySelectorAll('.panel-page')];
 const DEFAULT_EMPTY_LEAD = 'Abra uma lâmina Aperio .SVS armazenada no dispositivo.';
 const DEFAULT_EMPTY_HINT = 'Arquivos grandes são lidos por partes. Não é necessário carregar a lâmina inteira na memória.';
 const INIT_TIMEOUT_MS = 30000;
-const FIRST_TILE_TIMEOUT_MS = 20000;
+const FIRST_TILE_TIMEOUT_DESKTOP_MS = 20000;
+const FIRST_TILE_TIMEOUT_MOBILE_MS = 60000;
+const MOBILE_WASM_MANIFEST_URL = '/wasm-mobile/manifest.json';
+const MOBILE_DZI_TILE_SIZE = 128;
+const DESKTOP_DZI_TILE_SIZE = 254;
 const PREFS_KEY = 'virtum-svs-viewer-prefs-v035';
 const AUTOSAVE_INDEX_KEY = 'virtum-svs-viewer-autosave-index-v036';
 const AUTOSAVE_PREFIX = 'virtum-svs-viewer-autosave-v036:';
@@ -235,7 +240,7 @@ const SESSIONS_KEY = 'virtum-svs-sessions-v040';
 const LIBRARY_MAX_ITEMS = 40;
 const SESSION_MAX_ITEMS = 40;
 const LIBRARY_CATEGORIES = ['Histologia', 'Anatomia', 'Patologia', 'Outros'];
-const DEVICE_BENCHMARK_KEY = 'virtum-svs-device-benchmark-v0522';
+const DEVICE_BENCHMARK_KEY = 'virtum-svs-device-benchmark-v053';
 const DEVICE_BENCHMARK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MEMORY_SAFE_CONFIG = {
   label: 'Mobile Safe',
@@ -246,7 +251,7 @@ const MEMORY_SAFE_CONFIG = {
   readAhead: 0,
   jobLimit: 1,
   preload: false,
-  tileCacheCount: 24,
+  tileCacheCount: 16,
 };
 const WASM_UPSTREAM_INITIAL_PAGES = 256; // 16 MiB
 const WASM_UPSTREAM_MAX_PAGES = 32768;   // 2 GiB
@@ -327,6 +332,14 @@ const state = {
   startupPhase: 'Em espera',
   lastEngineError: '',
   wasmMemoryProbe: null,
+  wasmVariant: 'stock',
+  mobileWasmStatus: 'não verificado',
+  mobileWasmManifest: null,
+  firstTileRequestedAt: 0,
+  firstTileDecodedAt: 0,
+  firstTileDecodeMs: null,
+  firstTileBitmapMs: null,
+  firstTileTotalMs: null,
   tileRequested: 0,
   tileLoadedCount: 0,
   tileFailedCount: 0,
@@ -367,7 +380,7 @@ const state = {
 const viewer = OpenSeadragon({
   element: ui.viewer,
   showNavigationControl: false,
-  showNavigator: true,
+  showNavigator: !detectMobileDevice(),
   navigatorPosition: 'BOTTOM_RIGHT',
   navigatorSizeRatio: 0.18,
   animationTime: 0.65,
@@ -396,7 +409,7 @@ const viewer = OpenSeadragon({
 const compareViewer = OpenSeadragon({
   element: ui.compareViewer,
   showNavigationControl: false,
-  showNavigator: true,
+  showNavigator: !detectMobileDevice(),
   navigatorPosition: 'BOTTOM_RIGHT',
   navigatorSizeRatio: 0.16,
   animationTime: 0.45,
@@ -1305,7 +1318,7 @@ async function openCompareSvs(file) {
     const slide = await state.openslide.open(file);
     state.compareSlide = slide;
     state.compareDims = slide.levelDimensions?.[0] || null;
-    state.compareGenerator = new DeepZoomGenerator(slide);
+    state.compareGenerator = new DeepZoomGenerator(slide, { tileSize: DESKTOP_DZI_TILE_SIZE, overlap: 1 });
     const tileSource = createOpenSlideTileSource([state.compareGenerator], file.name);
     compareViewer.open(tileSource);
     showToast('Segunda lâmina aberta', 'success');
@@ -1409,9 +1422,11 @@ function armFirstTileTimeout() {
     state.awaitingFirstTile = false;
     setBusy(false);
     if (!state.tileLoaded && state.currentFile) {
-      setStatus(`${state.currentFile.name} · aberta, mas os primeiros blocos estão demorando para renderizar`);
+      const elapsed = state.firstTileRequestedAt ? Math.round(performance.now() - state.firstTileRequestedAt) : null;
+      setStartupPhase(`Primeiro tile ainda processando${elapsed ? ` · ${elapsed} ms` : ''}`);
+      setStatus(`${state.currentFile.name} · cabeçalho aberto; primeiro bloco ainda está sendo decodificado no tablet`);
     }
-  }, FIRST_TILE_TIMEOUT_MS);
+  }, detectMobileDevice() ? FIRST_TILE_TIMEOUT_MOBILE_MS : FIRST_TILE_TIMEOUT_DESKTOP_MS);
 }
 
 async function closeCurrentSlide() {
@@ -1857,7 +1872,7 @@ function startupDiagnosticText() {
   const engine = engineSettingsForCurrentMode();
   const benchmark = state.deviceBenchmark;
   return [
-    'Virtum SVS Viewer v0.5.2.2 · Mobile Compatibility',
+    'Virtum SVS Viewer v0.5.3 · Mobile WASM Preview',
     `Data: ${new Date().toLocaleString('pt-BR')}`,
     `UA: ${navigator.userAgent || '—'}`,
     `Móvel/tablet: ${detectMobileDevice()}`,
@@ -1870,10 +1885,12 @@ function startupDiagnosticText() {
     `RAM deviceMemory: ${navigator.deviceMemory ?? 'não informada'}`,
     `Benchmark: ${benchmark ? `${benchmark.cpuMs.toFixed(1)} ms · score ${benchmark.score.toFixed(1)} · ${benchmark.tier}` : 'não executado'}`,
     `Modo seguro: ${state.memorySafeMode}`,
+    `Engine WASM: ${state.mobileWasmStatus} (${state.wasmVariant})`,
     `Workers: ${engine.workerCount}`,
     `Block size: ${Math.round((engine.blockSize || 1024 * 1024) / 1024)} KiB`,
     `Broker cache: ${Math.round(engine.brokerCacheBytes / (1024 * 1024))} MiB`,
     `Fase: ${state.startupPhase}`,
+    `Primeiro tile: ${state.firstTileTotalMs == null ? '—' : `${Math.round(state.firstTileTotalMs)} ms`} · decode ${state.firstTileDecodeMs == null ? '—' : `${Math.round(state.firstTileDecodeMs)} ms`} · bitmap ${state.firstTileBitmapMs == null ? '—' : `${Math.round(state.firstTileBitmapMs)} ms`}`,
     `Probe WASM: ${wasmProbeText()}`,
     `Último erro: ${state.lastEngineError || '—'}`,
   ].join('\n');
@@ -1921,10 +1938,60 @@ async function testOpenSlideEngine() {
   }
 }
 
+async function resolveOpenSlideWasmAssets() {
+  const stock = {
+    variant: 'stock',
+    label: 'Padrão · pacote npm',
+    wasmJsUrl: new URL('@computationalpathologygroup/openslide-js/wasm/openslide.js', import.meta.url).href,
+    wasmBinaryUrl: new URL('@computationalpathologygroup/openslide-js/wasm/openslide.wasm', import.meta.url),
+  };
+
+  const wantsMobile = detectMobileDevice() || state.memorySafeMode;
+  if (!wantsMobile) {
+    state.wasmVariant = 'stock';
+    state.mobileWasmStatus = 'desktop · engine padrão';
+    return stock;
+  }
+
+  try {
+    state.mobileWasmStatus = 'verificando Mobile WASM…';
+    updateStartupDiagnostics();
+    const manifestUrl = new URL(MOBILE_WASM_MANIFEST_URL, window.location.origin);
+    manifestUrl.searchParams.set('v', '053');
+    const response = await fetch(manifestUrl, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`manifest HTTP ${response.status}`);
+    const manifest = await response.json();
+    if (!manifest?.ready || !manifest?.js || !manifest?.wasm) throw new Error('manifest incompleto');
+
+    const jsUrl = new URL(manifest.js, window.location.origin).href;
+    const wasmUrl = new URL(manifest.wasm, window.location.origin);
+    const probe = await fetch(wasmUrl, { method: 'HEAD', cache: 'no-store' });
+    if (!probe.ok) throw new Error(`WASM HTTP ${probe.status}`);
+
+    state.wasmVariant = 'mobile-512';
+    state.mobileWasmManifest = manifest;
+    state.mobileWasmStatus = `Mobile WASM ${manifest.maximumMemoryMiB || 512} MiB · ativo`;
+    return {
+      variant: 'mobile-512',
+      label: state.mobileWasmStatus,
+      wasmJsUrl: jsUrl,
+      wasmBinaryUrl: wasmUrl,
+    };
+  } catch (error) {
+    state.wasmVariant = 'stock-fallback';
+    state.mobileWasmStatus = 'Mobile WASM ausente · fallback padrão';
+    console.warn('Mobile WASM ainda não disponível; usando build padrão:', error);
+    return stock;
+  } finally {
+    updateStartupDiagnostics();
+  }
+}
+
 async function initializeAttempt({ ioEnabled, label }) {
   const workerUrl = new URL('@computationalpathologygroup/openslide-js/worker', import.meta.url);
-  const wasmJsUrl = new URL('@computationalpathologygroup/openslide-js/wasm/openslide.js', import.meta.url).href;
-  const wasmBinaryUrl = new URL('@computationalpathologygroup/openslide-js/wasm/openslide.wasm', import.meta.url);
+  const wasmAssets = await resolveOpenSlideWasmAssets();
+  const wasmJsUrl = wasmAssets.wasmJsUrl;
+  const wasmBinaryUrl = wasmAssets.wasmBinaryUrl;
 
   const workers = new Set();
   let timeoutId;
@@ -1937,7 +2004,7 @@ async function initializeAttempt({ ioEnabled, label }) {
 
   let wasmBinary;
   try {
-    setStartupPhase('Baixando OpenSlide WASM');
+    setStartupPhase(`Baixando OpenSlide WASM · ${state.wasmVariant}`);
     const response = await fetch(wasmBinaryUrl);
     if (!response.ok) {
       throw new Error(`WASM HTTP ${response.status}: ${response.statusText || 'falha ao carregar'}`);
@@ -2216,7 +2283,8 @@ async function openSvs(file) {
     const slide = await state.openslide.open(file);
     state.slides.push(slide);
     setStartupPhase('Criando pirâmide Deep Zoom');
-    state.generators = [new DeepZoomGenerator(slide)];
+    const mobileTileSize = (detectMobileDevice() || state.memorySafeMode) ? MOBILE_DZI_TILE_SIZE : DESKTOP_DZI_TILE_SIZE;
+    state.generators = [new DeepZoomGenerator(slide, { tileSize: mobileTileSize, overlap: 1 })];
 
     updateMetadata(file, slide);
     upsertLibraryEntry(file, slide);
@@ -2231,21 +2299,50 @@ async function openSvs(file) {
     hideLibrary();
 
     state.tileRequested = 0;
+    state.firstTileRequestedAt = 0;
+    state.firstTileDecodedAt = 0;
+    state.firstTileDecodeMs = null;
+    state.firstTileBitmapMs = null;
+    state.firstTileTotalMs = null;
     state.tileLoadedCount = 0;
     state.tileFailedCount = 0;
     state.tileAbortedCount = 0;
     state.tileLevelCounts = {};
     const tileSource = createOpenSlideTileSource(state.generators, file.name, {
-      onTileStart: ({ level }) => { state.tileRequested += 1; state.tileLevelCounts[level] = state.tileLevelCounts[level] || 0; updateDiagnostics(); },
-      onTileLoaded: ({ level }) => { state.tileLoadedCount += 1; state.tileLevelCounts[level] = (state.tileLevelCounts[level] || 0) + 1; updateDiagnostics(); },
-      onTileError: () => { state.tileFailedCount += 1; updateDiagnostics(); },
+      onTileStart: ({ level, startedAt }) => {
+        state.tileRequested += 1;
+        if (!state.firstTileRequestedAt) {
+          state.firstTileRequestedAt = startedAt || performance.now();
+          setStartupPhase('Primeiro tile · lendo e decodificando…');
+        }
+        state.tileLevelCounts[level] = state.tileLevelCounts[level] || 0;
+        updateDiagnostics();
+      },
+      onTileDecoded: ({ decodeMs, decodedAt }) => {
+        if (state.firstTileDecodeMs == null) {
+          state.firstTileDecodeMs = decodeMs;
+          state.firstTileDecodedAt = decodedAt || performance.now();
+          setStartupPhase(`Primeiro tile decodificado · ${Math.round(decodeMs)} ms · preparando bitmap`);
+        }
+      },
+      onTileLoaded: ({ level, decodeMs, bitmapMs, totalMs }) => {
+        state.tileLoadedCount += 1;
+        if (state.firstTileTotalMs == null) {
+          state.firstTileDecodeMs = decodeMs;
+          state.firstTileBitmapMs = bitmapMs;
+          state.firstTileTotalMs = totalMs;
+        }
+        state.tileLevelCounts[level] = (state.tileLevelCounts[level] || 0) + 1;
+        updateDiagnostics();
+      },
+      onTileError: ({ error }) => { state.tileFailedCount += 1; state.lastEngineError = error?.message || String(error || 'Falha de tile'); updateDiagnostics(); },
       onTileAbort: () => { state.tileAbortedCount += 1; updateDiagnostics(); },
     });
     state.tileLoaded = false;
     state.tileErrors = 0;
     state.rotation = 0;
     state.awaitingFirstTile = true;
-    setStartupPhase('Aguardando primeiro tile');
+    setStartupPhase(`Aguardando primeiro tile · ${detectMobileDevice() ? 'mobile 128 px' : 'desktop 254 px'}`);
     viewer.open(tileSource);
     ui.emptyState.hidden = true;
     setViewerControlsEnabled(true);
@@ -2414,7 +2511,7 @@ function updateDiagnostics() {
   const cacheMB = Math.round((state.engineBrokerCacheBytes || engineSettings.brokerCacheBytes) / (1024 * 1024));
   const recommendedWorkers = state.engineWorkerCount || engineSettings.workerCount;
   const compareActive = hasCompareSlide();
-  const cacheFloor = state.memorySafeMode ? 16 : 48;
+  const cacheFloor = state.memorySafeMode ? 8 : 48;
   const cacheCount = Math.max(cacheFloor, Math.round((cfg.tileCacheCount || 160) * (compareActive ? 0.65 : 1)));
   const baseJobLimit = Math.max(state.memorySafeMode ? 1 : 2, Math.round((cfg.jobLimit || 6) * (compareActive ? 0.68 : 1)));
   const activeJobLimit = Math.max(state.memorySafeMode ? 1 : 2, Math.round(baseJobLimit * state.runtimeThrottle));
@@ -2439,9 +2536,9 @@ function updateDiagnostics() {
   if (ui.diagWorkers) {
     const activeWorkers = state.engineWorkerCount;
     if (state.ready && activeWorkers && activeWorkers !== engineSettings.workerCount) {
-      ui.diagWorkers.textContent = `${activeWorkers} ativos · ${engineSettings.workerCount} recomendados · broker ${cacheMB} MB`;
+      ui.diagWorkers.textContent = `${activeWorkers} ativos · ${engineSettings.workerCount} recomendados · broker ${cacheMB} MB · ${state.mobileWasmStatus}`;
     } else {
-      ui.diagWorkers.textContent = `${recommendedWorkers} · broker ${cacheMB} MB${state.ready ? ' · motor ativo' : ' · recomendado'}`;
+      ui.diagWorkers.textContent = `${recommendedWorkers} · broker ${cacheMB} MB · ${state.mobileWasmStatus}${state.ready ? ' · motor ativo' : ' · recomendado'}`;
     }
   }
   if (ui.diagMemoryMode) {
@@ -2485,7 +2582,7 @@ function updateStartupDiagnostics() {
   const memory = benchmark?.memory ?? navigator.deviceMemory ?? null;
   const cfg = currentProfileConfig();
   const engine = engineSettingsForCurrentMode();
-  const cacheFloor = state.memorySafeMode ? 16 : 48;
+  const cacheFloor = state.memorySafeMode ? 8 : 48;
   const cacheCount = Math.max(cacheFloor, Math.round(cfg.tileCacheCount || 160));
   const profileKey = effectiveProfileKey();
   const profileLabel = PERFORMANCE_PROFILES[profileKey]?.label || profileKey;
@@ -2516,6 +2613,10 @@ function updateStartupDiagnostics() {
   if (ui.startupDiagMemory) {
     ui.startupDiagMemory.textContent = state.memorySafeMode ? `Seguro · ${memorySafeReason()}` : 'Normal';
   }
+  if (ui.startupDiagEngine) {
+    const tileSize = (mobile || state.memorySafeMode) ? MOBILE_DZI_TILE_SIZE : DESKTOP_DZI_TILE_SIZE;
+    ui.startupDiagEngine.textContent = `${state.mobileWasmStatus} · tiles ${tileSize}px`;
+  }
   if (ui.startupDiagCompat) {
     ui.startupDiagCompat.textContent = compatibilityProblem || 'HTTPS / isolamento / WASM disponíveis';
   }
@@ -2531,7 +2632,7 @@ function updateStartupDiagnostics() {
   if (ui.startupSafetyNotice) {
     if (state.memorySafeMode) {
       ui.startupSafetyNotice.dataset.state = 'safe';
-      ui.startupSafetyNotice.textContent = 'Proteção de memória ativa. Em tablet o OpenSlide fará uma única tentativa com 1 worker, sem retries e com caches mínimos.';
+      ui.startupSafetyNotice.textContent = 'Proteção móvel ativa. Usa 1 worker, tiles de 128 px, navegador sem mini-mapa e prefere o OpenSlide WASM móvel de 512 MiB quando instalado.';
     } else if (isLikelyConstrainedDevice()) {
       ui.startupSafetyNotice.dataset.state = 'warning';
       ui.startupSafetyNotice.textContent = 'Este dispositivo parece móvel ou limitado. Recomenda-se manter o Modo seguro ativado antes de abrir a primeira lâmina.';
@@ -2620,7 +2721,7 @@ function applyPerformanceProfile(silent = false) {
   const minimumJobs = state.memorySafeMode ? 1 : 2;
   const baseJobLimit = Math.max(minimumJobs, Math.round(cfg.jobLimit * (compareActive ? 0.68 : 1)));
   const jobLimit = Math.max(minimumJobs, Math.round(baseJobLimit * state.runtimeThrottle));
-  const cacheFloor = state.memorySafeMode ? 16 : 48;
+  const cacheFloor = state.memorySafeMode ? 8 : 48;
   const cacheCount = Math.max(cacheFloor, Math.round(cfg.tileCacheCount * (compareActive ? 0.65 : 1)));
   const preload = !state.memorySafeMode && !detectMobileDevice() && (cfg.preload || state.highDefinition) && !(compareActive && state.deviceBenchmark?.tier === 'lite');
 
@@ -4446,7 +4547,7 @@ function getReportHtml({ imageData = '' } = {}) {
   const lessonSection = opts.includeLesson && lessonRows ? `<section><h2>${escapeHtml(state.lessonTitle || 'Sequência do Modo Aula')}</h2><table><thead><tr><th>Etapa</th><th>Título</th><th>Observação</th></tr></thead><tbody>${lessonRows}</tbody></table></section>` : '';
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${escapeHtml(identity.title)}</title><style>
   *{box-sizing:border-box}body{font:14px Inter,system-ui,sans-serif;margin:0;color:#1f2530;background:#eef1f5}.page{max-width:920px;margin:24px auto;background:white;box-shadow:0 12px 42px #0002}.head{padding:30px 38px 24px;background:#151820;color:#fff;border-top:7px solid #d92335}.head h1{margin:0;font-size:27px}.head p{margin:6px 0 0;color:#b9c0ca}.content{padding:28px 38px 38px}.identity{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:0 0 20px}.identity div,.meta div{padding:10px 12px;background:#f4f6f8;border-radius:8px}.identity b,.meta b{display:block;font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px}.meta{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:0 0 26px}.meta div{font-size:12px}.shot{display:block;width:100%;max-height:520px;object-fit:contain;border:1px solid #d8dde4;border-radius:10px;background:#f3f4f6}h2{font-size:16px;margin:28px 0 10px}table{border-collapse:collapse;width:100%;margin:0 0 20px}th,td{border-bottom:1px solid #e0e4ea;padding:9px 8px;text-align:left;vertical-align:top}th{font-size:10px;color:#667085;text-transform:uppercase}.num{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;color:white;font-weight:800}.foot{padding:16px 38px;border-top:1px solid #e2e6eb;color:#737b87;font-size:10px;display:flex;justify-content:space-between}.no-print{padding:0 38px 30px}@media(max-width:700px){.page{margin:0}.identity,.meta{grid-template-columns:1fr 1fr}.content,.head,.foot{padding-left:20px;padding-right:20px}}@media print{body{background:white}.page{max-width:none;margin:0;box-shadow:none}.no-print{display:none}@page{size:A4;margin:12mm}}
-  </style></head><body><article class="page"><header class="head"><h1>${escapeHtml(identity.title)}</h1><p>Virtum SVS Viewer · relatório local · v0.5.2.2</p></header><div class="content"><div class="identity"><div><b>Professor(a)</b>${escapeHtml(identity.professor || '—')}</div><div><b>Aluno(a)</b>${escapeHtml(identity.student || '—')}</div><div><b>Instituição / disciplina</b>${escapeHtml(identity.institution || '—')}</div><div><b>Sessão / categoria</b>${escapeHtml([identity.session, identity.category].filter(Boolean).join(' · ') || '—')}</div></div><div class="meta"><div><b>Lâmina</b>${escapeHtml(payload.slide.name)}</div><div><b>Dimensões</b>${escapeHtml(payload.slide.width)} × ${escapeHtml(payload.slide.height)} px</div><div><b>Ampliação</b>${state.objectivePower ? `${escapeHtml(state.objectivePower)}×` : 'não informado'}</div><div><b>MPP</b>${payload.slide.mppX ? `${escapeHtml(payload.slide.mppX)} µm/px` : 'não informado'}</div></div>${imageSection}${measurementSection}${annotationSection}${lessonSection}</div><footer class="foot"><span>Gerado pelo Virtum SVS Viewer</span><span>${escapeHtml(new Date().toLocaleString('pt-BR'))}</span></footer><div class="no-print"><button onclick="window.print()">Imprimir / Salvar em PDF</button></div></article></body></html>`;
+  </style></head><body><article class="page"><header class="head"><h1>${escapeHtml(identity.title)}</h1><p>Virtum SVS Viewer · relatório local · v0.5.3</p></header><div class="content"><div class="identity"><div><b>Professor(a)</b>${escapeHtml(identity.professor || '—')}</div><div><b>Aluno(a)</b>${escapeHtml(identity.student || '—')}</div><div><b>Instituição / disciplina</b>${escapeHtml(identity.institution || '—')}</div><div><b>Sessão / categoria</b>${escapeHtml([identity.session, identity.category].filter(Boolean).join(' · ') || '—')}</div></div><div class="meta"><div><b>Lâmina</b>${escapeHtml(payload.slide.name)}</div><div><b>Dimensões</b>${escapeHtml(payload.slide.width)} × ${escapeHtml(payload.slide.height)} px</div><div><b>Ampliação</b>${state.objectivePower ? `${escapeHtml(state.objectivePower)}×` : 'não informado'}</div><div><b>MPP</b>${payload.slide.mppX ? `${escapeHtml(payload.slide.mppX)} µm/px` : 'não informado'}</div></div>${imageSection}${measurementSection}${annotationSection}${lessonSection}</div><footer class="foot"><span>Gerado pelo Virtum SVS Viewer</span><span>${escapeHtml(new Date().toLocaleString('pt-BR'))}</span></footer><div class="no-print"><button onclick="window.print()">Imprimir / Salvar em PDF</button></div></article></body></html>`;
 }
 
 async function exportHtmlReport() {
@@ -4534,7 +4635,7 @@ async function exportPdfReport() {
     const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
     const pageWidth = pdf.internal.pageSize.getWidth();
     const contentWidth = pageWidth - 28;
-    pdfPageHeader(pdf, identity.title, 'Virtum SVS Viewer · Reports & Export · v0.5.2.2');
+    pdfPageHeader(pdf, identity.title, 'Virtum SVS Viewer · Reports & Export · v0.5.3');
     let y = 31;
 
     const identityRows = [
@@ -4934,7 +5035,8 @@ viewer.addHandler('tile-loaded', () => {
     clearFirstTileTimer();
     setBusy(false);
     redrawOverlays();
-    setStartupPhase('Lâmina pronta');
+    const timing = state.firstTileTotalMs != null ? ` · ${Math.round(state.firstTileTotalMs)} ms` : '';
+    setStartupPhase(`Lâmina pronta${timing}`);
     if (state.currentFile) {
       setStatus(`${state.currentFile.name} · lâmina pronta · ${qualitySummaryText(screenPixelsPerImagePixel())}`);
     }

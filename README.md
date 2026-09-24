@@ -1,63 +1,108 @@
-# Virtum SVS Viewer v0.5.2.2 · Mobile Compatibility
+# Virtum SVS Viewer v0.5.3 · Mobile WASM Preview
 
-Hotfix da v0.5.2 focada em descobrir e reduzir falhas de memória na inicialização do OpenSlide em tablets, Chromebooks e navegadores móveis. Mantém Reports & Export e todos os recursos anteriores.
+Versão experimental focada no gargalo observado em tablets: a lâmina consegue ter
+o cabeçalho/metadados reconhecidos, mas o primeiro tile pode demorar demais ou
+falhar antes de aparecer.
 
-## O que mudou
+A v0.5.3 ataca isso em **duas frentes**:
 
-- diagnóstico disponível antes de abrir qualquer lâmina;
-- Modo seguro automático em tablet/mobile;
-- **1 worker** no OpenSlide;
-- **uma única tentativa de inicialização WASM** em tablet, evitando acumular pressão de memória com retries;
-- broker/cache configurado em **8 MiB** quando utilizado;
-- bloco de I/O reduzido para **256 KiB**;
-- fila visual de **1** e cache visual de aproximadamente **24 tiles**;
-- preload e Alta definição desligados no modo seguro;
-- Compare bloqueado no modo seguro;
-- `jsPDF` passa a ser carregado somente ao gerar PDF, reduzindo o JavaScript residente antes de abrir a lâmina;
-- fases da inicialização registradas no diagnóstico;
-- último erro registrado e copiável.
+1. o Viewer fica bem mais conservador durante o primeiro render móvel;
+2. o projeto já sabe usar um **OpenSlide WASM recompilado para mobile**, com teto
+   de memória de 512 MiB, assim que esse build for gerado pelo workflow do GitHub.
 
-## Diagnóstico móvel
+## Melhorias de runtime móvel
 
-Na Biblioteca abra `Diagnóstico` ou `Mais → Diagnóstico`.
+- mini-mapa/Navigator do OpenSeadragon desligado em mobile para evitar uma segunda
+  cadeia de tiles;
+- Deep Zoom móvel usa tiles de **128 × 128 px** em vez de 254 × 254 px;
+- 1 worker no modo seguro;
+- cache visual reduzido para aproximadamente **16 tiles**;
+- broker de 8 MiB, bloco de I/O de 256 KiB, read-ahead 0;
+- Compare e Alta definição continuam bloqueados no modo seguro;
+- tempo de tolerância do primeiro tile passa de 20 s para **60 s no mobile**;
+- diagnóstico registra tempo de decodificação do primeiro tile e tempo de criação
+  do `ImageBitmap`;
+- o diagnóstico mostra qual engine está ativa: `stock`, `stock-fallback` ou
+  `mobile-512`.
 
-Novos testes:
+## OpenSlide WASM Mobile 512 MiB
 
-### Testar motor
-
-Inicializa o OpenSlide **sem selecionar um arquivo .SVS**. Se falhar aqui, o problema acontece antes da leitura da lâmina.
-
-### Probe WASM
-
-Testa separadamente a memória compartilhada WebAssembly. Primeiro tenta um teto de referência de **512 MiB**. Somente se isso funcionar, testa o teto de **2 GiB** usado pelo build WebAssembly atual do OpenSlide/Emscripten.
-
-Resultados importantes:
+Quando os arquivos abaixo existem:
 
 ```text
-512 MiB OK · 2 GiB FALHOU
+public/wasm-mobile/manifest.json
+public/wasm-mobile/openslide.js
+public/wasm-mobile/openslide.wasm
 ```
 
-fortemente indica que o navegador móvel aceita WebAssembly compartilhado, mas rejeita o teto de memória do build atual. Nesse caso o próximo passo é gerar um build móvel próprio do OpenSlide/WASM com `MAXIMUM_MEMORY` menor.
+o Virtum passa a preferi-los automaticamente em tablet/mobile ou Modo seguro.
+Desktop continua usando o WASM oficial do pacote NPM.
 
-### Copiar diagnóstico
-
-Gera um resumo com navegador, CPU, memória exposta, isolamento, SharedArrayBuffer, workers, fase atual, Probe WASM e último erro.
-
-## Perfil seguro
+O build móvel mantém a pipeline upstream do `openslide-js`, alterando apenas os
+parâmetros Emscripten de memória:
 
 ```text
-Workers: 1
-Broker cache: 8 MiB
-Block size: 256 KiB
-Leituras simultâneas: 1
-Read ahead: 0
-Fila de tiles: 1
-Cache visual: ~24 tiles
-Preload: OFF
-Compare: bloqueado
-Alta definição: bloqueada
-Retries WASM em tablet: OFF
+INITIAL_MEMORY = 16 MiB
+MAXIMUM_MEMORY = 512 MiB
+ALLOW_MEMORY_GROWTH = on
+MEMORY_GROWTH_GEOMETRIC_STEP = 10%
+MEMORY_GROWTH_GEOMETRIC_CAP = 16 MiB
 ```
+
+O `openslide-js` oficial também é compilado para WebAssembly e exige COOP/COEP;
+esses headers continuam configurados no `vercel.json`.
+
+## Gerar o WASM móvel no GitHub
+
+O build upstream requer Docker. Por isso esta versão inclui:
+
+```text
+.github/workflows/build-mobile-wasm.yml
+mobile-wasm/patch-build.py
+mobile-wasm/README.md
+```
+
+Depois de subir o projeto para o GitHub:
+
+1. abra **Actions**;
+2. selecione **Build Mobile OpenSlide WASM**;
+3. clique em **Run workflow**;
+4. deixe `upstream_ref = main` inicialmente;
+5. aguarde o build.
+
+O workflow compila o OpenSlide, copia os assets para `public/wasm-mobile/`, gera
+`manifest.json`, registra o commit upstream usado e faz commit dos arquivos. Se o
+repositório estiver conectado à Vercel, esse commit dispara um novo deploy.
+
+> Enquanto esse workflow ainda não tiver sido executado, a v0.5.3 funciona com o
+> engine padrão e mostra `Mobile WASM ausente · fallback padrão` no diagnóstico.
+
+## Teste no tablet
+
+Depois do deploy com o WASM móvel:
+
+```text
+Biblioteca → Diagnóstico
+```
+
+Deve aparecer algo como:
+
+```text
+Engine
+Mobile WASM 512 MiB · ativo · tiles 128px
+```
+
+Depois abra a mesma lâmina. Durante a primeira renderização o diagnóstico passa
+por fases como:
+
+```text
+Primeiro tile · lendo e decodificando…
+Primeiro tile decodificado · 2800 ms · preparando bitmap
+Lâmina pronta · 3100 ms
+```
+
+Isso permite separar demora de leitura/decodificação de demora na conversão para
+o OpenSeadragon.
 
 ## Executar localmente
 
@@ -75,4 +120,5 @@ npm run preview
 
 ## Vercel
 
-A configuração Vercel Ready foi preservada, incluindo COOP/COEP/CORP, saída `dist/` e `/health.txt`. O arquivo `.SVS` continua no dispositivo do usuário.
+A configuração Vercel Ready foi preservada. O `.SVS` continua no dispositivo do
+usuário; apenas o Viewer e seus assets WASM são hospedados.

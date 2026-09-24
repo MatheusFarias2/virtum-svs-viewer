@@ -1,0 +1,107 @@
+name: Build Mobile OpenSlide WASM
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "openslide-js ref (branch, tag or commit)"
+        required: true
+        default: "main"
+
+permissions:
+  contents: write
+
+jobs:
+  build-mobile-wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout Virtum
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout openslide-js source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/computationalpathologygroup/openslide-js.git .mobile-wasm-src
+          cd .mobile-wasm-src
+          git checkout "${{ inputs.upstream_ref }}"
+          git rev-parse HEAD | tee ../mobile-wasm/upstream-commit.txt
+
+      - name: Patch WASM memory profile
+        run: python3 mobile-wasm/patch-build.py .mobile-wasm-src
+
+      - name: Build mobile OpenSlide WASM
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -t virtum-openslide-mobile .mobile-wasm-src/wasm
+          mkdir -p "$PWD/.mobile-wasm-src/wasm/dist"
+          docker run --rm \
+            -v "$PWD/.mobile-wasm-src/wasm/dist:/output" \
+            virtum-openslide-mobile
+          test -s .mobile-wasm-src/wasm/dist/openslide.js
+          test -s .mobile-wasm-src/wasm/dist/openslide.wasm
+
+      - name: Install mobile assets into Virtum
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf public/wasm-mobile
+          mkdir -p public/wasm-mobile
+          cp -a .mobile-wasm-src/wasm/dist/. public/wasm-mobile/
+          COMMIT="$(cat mobile-wasm/upstream-commit.txt)"
+          cat > public/wasm-mobile/manifest.json <<EOF
+          {
+            "ready": true,
+            "variant": "virtum-mobile-512",
+            "maximumMemoryMiB": 512,
+            "initialMemoryMiB": 16,
+            "js": "/wasm-mobile/openslide.js",
+            "wasm": "/wasm-mobile/openslide.wasm",
+            "upstream": "computationalpathologygroup/openslide-js",
+            "upstreamCommit": "$COMMIT"
+          }
+          EOF
+          cat > public/wasm-mobile/SOURCE.md <<EOF
+          # Mobile OpenSlide WASM source
+
+          Upstream: https://github.com/computationalpathologygroup/openslide-js
+
+          Commit: $COMMIT
+
+          Build modification: \`mobile-wasm/patch-build.py\`
+
+          Memory profile: initial 16 MiB, maximum 512 MiB, 10% geometric growth,
+          16 MiB growth cap. All other upstream build flags remain unchanged.
+          EOF
+          if [ -f .mobile-wasm-src/LICENSE ]; then cp .mobile-wasm-src/LICENSE public/wasm-mobile/LICENSE; fi
+          if [ -f .mobile-wasm-src/NOTICE ]; then cp .mobile-wasm-src/NOTICE public/wasm-mobile/NOTICE; fi
+
+      - name: Verify generated mobile engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s public/wasm-mobile/openslide.js
+          test -s public/wasm-mobile/openslide.wasm
+          test -s public/wasm-mobile/manifest.json
+          grep -q '"maximumMemoryMiB": 512' public/wasm-mobile/manifest.json
+          echo "Generated files:"
+          ls -lh public/wasm-mobile
+
+      - name: Commit mobile WASM assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/wasm-mobile mobile-wasm/upstream-commit.txt
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "build: add OpenSlide mobile WASM 512 MiB"
+          git push

@@ -2138,7 +2138,7 @@ summary:focus-visible,
 }
 
 
-/* v0.5.2.2 · Mobile Compatibility diagnostics */
+/* v0.5.3 · Mobile WASM Preview diagnostics */
 .startup-diagnostic-tools {
   display: grid;
   grid-template-columns: 1.15fr 1fr 1fr;

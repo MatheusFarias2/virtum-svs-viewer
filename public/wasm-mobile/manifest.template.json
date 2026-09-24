@@ -1,0 +1,10 @@
+{
+  "ready": true,
+  "variant": "virtum-mobile-512",
+  "maximumMemoryMiB": 512,
+  "initialMemoryMiB": 16,
+  "js": "/wasm-mobile/openslide.js",
+  "wasm": "/wasm-mobile/openslide.wasm",
+  "upstream": "computationalpathologygroup/openslide-js",
+  "upstreamCommit": "REPLACE_AFTER_BUILD"
+}
