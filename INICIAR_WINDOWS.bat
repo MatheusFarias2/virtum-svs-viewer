@@ -1,11 +1,11 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title Virtum SVS Viewer v0.5.3
+title Virtum SVS Viewer v0.5.3.1
 
 echo.
 echo ============================================
-echo       Virtum SVS Viewer v0.5.3
+echo       Virtum SVS Viewer v0.5.3.1
 echo ============================================
 echo.
 

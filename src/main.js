@@ -226,7 +226,7 @@ const INIT_TIMEOUT_MS = 30000;
 const FIRST_TILE_TIMEOUT_DESKTOP_MS = 20000;
 const FIRST_TILE_TIMEOUT_MOBILE_MS = 60000;
 const MOBILE_WASM_MANIFEST_URL = '/wasm-mobile/manifest.json';
-const MOBILE_DZI_TILE_SIZE = 128;
+const MOBILE_DZI_TILE_SIZE = 254;
 const DESKTOP_DZI_TILE_SIZE = 254;
 const PREFS_KEY = 'virtum-svs-viewer-prefs-v035';
 const AUTOSAVE_INDEX_KEY = 'virtum-svs-viewer-autosave-index-v036';
@@ -243,15 +243,15 @@ const LIBRARY_CATEGORIES = ['Histologia', 'Anatomia', 'Patologia', 'Outros'];
 const DEVICE_BENCHMARK_KEY = 'virtum-svs-device-benchmark-v053';
 const DEVICE_BENCHMARK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MEMORY_SAFE_CONFIG = {
-  label: 'Mobile Safe',
+  label: 'Mobile Fast Safe',
   workerCount: 1,
-  blockSize: 256 * 1024,
-  brokerCacheBytes: 8 * 1024 * 1024,
-  maxConcurrentReads: 1,
-  readAhead: 0,
-  jobLimit: 1,
+  blockSize: 1024 * 1024,
+  brokerCacheBytes: 24 * 1024 * 1024,
+  maxConcurrentReads: 2,
+  readAhead: 1,
+  jobLimit: 2,
   preload: false,
-  tileCacheCount: 16,
+  tileCacheCount: 24,
 };
 const WASM_UPSTREAM_INITIAL_PAGES = 256; // 16 MiB
 const WASM_UPSTREAM_MAX_PAGES = 32768;   // 2 GiB
@@ -383,8 +383,10 @@ const viewer = OpenSeadragon({
   showNavigator: !detectMobileDevice(),
   navigatorPosition: 'BOTTOM_RIGHT',
   navigatorSizeRatio: 0.18,
-  animationTime: 0.65,
-  blendTime: 0.08,
+  animationTime: detectMobileDevice() ? 0.4 : 0.65,
+  blendTime: detectMobileDevice() ? 0 : 0.08,
+  immediateRender: detectMobileDevice(),
+  minPixelRatio: detectMobileDevice() ? 1.25 : 0.5,
   constrainDuringPan: true,
   visibilityRatio: 0.12,
   minZoomImageRatio: 0.72,
@@ -412,8 +414,10 @@ const compareViewer = OpenSeadragon({
   showNavigator: !detectMobileDevice(),
   navigatorPosition: 'BOTTOM_RIGHT',
   navigatorSizeRatio: 0.16,
-  animationTime: 0.45,
-  blendTime: 0.08,
+  animationTime: detectMobileDevice() ? 0.35 : 0.45,
+  blendTime: detectMobileDevice() ? 0 : 0.08,
+  immediateRender: detectMobileDevice(),
+  minPixelRatio: detectMobileDevice() ? 1.25 : 0.5,
   constrainDuringPan: true,
   visibilityRatio: 0.12,
   minZoomImageRatio: 0.72,
@@ -1872,7 +1876,7 @@ function startupDiagnosticText() {
   const engine = engineSettingsForCurrentMode();
   const benchmark = state.deviceBenchmark;
   return [
-    'Virtum SVS Viewer v0.5.3 · Mobile WASM Preview',
+    'Virtum SVS Viewer v0.5.3.1 · Mobile Fast Start',
     `Data: ${new Date().toLocaleString('pt-BR')}`,
     `UA: ${navigator.userAgent || '—'}`,
     `Móvel/tablet: ${detectMobileDevice()}`,
@@ -2149,15 +2153,20 @@ async function ensureOpenSlide() {
 
       const mobileSingleAttempt = state.memorySafeMode && detectMobileDevice();
       if (mobileSingleAttempt) {
-        // Em tablet não repetimos a inicialização WASM: cada tentativa pode manter
-        // pressão de memória até o GC do navegador agir. Um único worker, sem broker.
-        setBusy(true, 'Modo móvel seguro', 'Uma única inicialização do OpenSlide · 1 worker · sem retry…');
-        setStartupPhase('Inicialização móvel única');
+        // O broker de I/O não carrega outra instância WASM. Ele centraliza leituras
+        // do File API, mantém um cache pequeno e faz read-ahead, reduzindo o custo
+        // de milhares de leituras pequenas sem aumentar o número de decoders.
+        setBusy(true, 'Modo móvel otimizado', '1 worker · I/O compartilhado · cache moderado…');
+        setStartupPhase('Inicialização móvel · I/O compartilhado');
         try {
-          state.openslide = await tryLocal('Inicialização móvel segura');
+          state.openslide = await tryBroker('Inicialização móvel otimizada');
         } catch (mobileError) {
           state.lastEngineError = explainInitError(mobileError);
-          throw mobileError;
+          if (isMemoryPressureError(mobileError)) throw mobileError;
+          console.warn('I/O compartilhado móvel falhou; usando fallback local compatível:', mobileError);
+          setBusy(true, 'Fallback móvel', 'I/O compartilhado indisponível · tentando acesso local…');
+          setStartupPhase('Fallback móvel · I/O local');
+          state.openslide = await tryLocal('Fallback móvel local');
         }
       } else try {
         state.openslide = await tryLocal();
@@ -2316,7 +2325,7 @@ async function openSvs(file) {
           setStartupPhase('Primeiro tile · lendo e decodificando…');
         }
         state.tileLevelCounts[level] = state.tileLevelCounts[level] || 0;
-        updateDiagnostics();
+        scheduleDiagnosticsUpdate();
       },
       onTileDecoded: ({ decodeMs, decodedAt }) => {
         if (state.firstTileDecodeMs == null) {
@@ -2333,16 +2342,16 @@ async function openSvs(file) {
           state.firstTileTotalMs = totalMs;
         }
         state.tileLevelCounts[level] = (state.tileLevelCounts[level] || 0) + 1;
-        updateDiagnostics();
+        scheduleDiagnosticsUpdate();
       },
-      onTileError: ({ error }) => { state.tileFailedCount += 1; state.lastEngineError = error?.message || String(error || 'Falha de tile'); updateDiagnostics(); },
-      onTileAbort: () => { state.tileAbortedCount += 1; updateDiagnostics(); },
+      onTileError: ({ error }) => { state.tileFailedCount += 1; state.lastEngineError = error?.message || String(error || 'Falha de tile'); scheduleDiagnosticsUpdate(); },
+      onTileAbort: () => { state.tileAbortedCount += 1; scheduleDiagnosticsUpdate(); },
     });
     state.tileLoaded = false;
     state.tileErrors = 0;
     state.rotation = 0;
     state.awaitingFirstTile = true;
-    setStartupPhase(`Aguardando primeiro tile · ${detectMobileDevice() ? 'mobile 128 px' : 'desktop 254 px'}`);
+    setStartupPhase(`Aguardando primeiro tile · ${detectMobileDevice() ? 'mobile 254 px · fast start' : 'desktop 254 px'}`);
     viewer.open(tileSource);
     ui.emptyState.hidden = true;
     setViewerControlsEnabled(true);
@@ -2632,7 +2641,7 @@ function updateStartupDiagnostics() {
   if (ui.startupSafetyNotice) {
     if (state.memorySafeMode) {
       ui.startupSafetyNotice.dataset.state = 'safe';
-      ui.startupSafetyNotice.textContent = 'Proteção móvel ativa. Usa 1 worker, tiles de 128 px, navegador sem mini-mapa e prefere o OpenSlide WASM móvel de 512 MiB quando instalado.';
+      ui.startupSafetyNotice.textContent = 'Proteção móvel otimizada. Usa 1 worker, I/O compartilhado com blocos de 1 MiB, cache de 24 MiB, tiles de 254 px e renderização direta para reduzir a espera inicial.';
     } else if (isLikelyConstrainedDevice()) {
       ui.startupSafetyNotice.dataset.state = 'warning';
       ui.startupSafetyNotice.textContent = 'Este dispositivo parece móvel ou limitado. Recomenda-se manter o Modo seguro ativado antes de abrir a primeira lâmina.';
@@ -4547,7 +4556,7 @@ function getReportHtml({ imageData = '' } = {}) {
   const lessonSection = opts.includeLesson && lessonRows ? `<section><h2>${escapeHtml(state.lessonTitle || 'Sequência do Modo Aula')}</h2><table><thead><tr><th>Etapa</th><th>Título</th><th>Observação</th></tr></thead><tbody>${lessonRows}</tbody></table></section>` : '';
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${escapeHtml(identity.title)}</title><style>
   *{box-sizing:border-box}body{font:14px Inter,system-ui,sans-serif;margin:0;color:#1f2530;background:#eef1f5}.page{max-width:920px;margin:24px auto;background:white;box-shadow:0 12px 42px #0002}.head{padding:30px 38px 24px;background:#151820;color:#fff;border-top:7px solid #d92335}.head h1{margin:0;font-size:27px}.head p{margin:6px 0 0;color:#b9c0ca}.content{padding:28px 38px 38px}.identity{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:0 0 20px}.identity div,.meta div{padding:10px 12px;background:#f4f6f8;border-radius:8px}.identity b,.meta b{display:block;font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px}.meta{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:0 0 26px}.meta div{font-size:12px}.shot{display:block;width:100%;max-height:520px;object-fit:contain;border:1px solid #d8dde4;border-radius:10px;background:#f3f4f6}h2{font-size:16px;margin:28px 0 10px}table{border-collapse:collapse;width:100%;margin:0 0 20px}th,td{border-bottom:1px solid #e0e4ea;padding:9px 8px;text-align:left;vertical-align:top}th{font-size:10px;color:#667085;text-transform:uppercase}.num{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;color:white;font-weight:800}.foot{padding:16px 38px;border-top:1px solid #e2e6eb;color:#737b87;font-size:10px;display:flex;justify-content:space-between}.no-print{padding:0 38px 30px}@media(max-width:700px){.page{margin:0}.identity,.meta{grid-template-columns:1fr 1fr}.content,.head,.foot{padding-left:20px;padding-right:20px}}@media print{body{background:white}.page{max-width:none;margin:0;box-shadow:none}.no-print{display:none}@page{size:A4;margin:12mm}}
-  </style></head><body><article class="page"><header class="head"><h1>${escapeHtml(identity.title)}</h1><p>Virtum SVS Viewer · relatório local · v0.5.3</p></header><div class="content"><div class="identity"><div><b>Professor(a)</b>${escapeHtml(identity.professor || '—')}</div><div><b>Aluno(a)</b>${escapeHtml(identity.student || '—')}</div><div><b>Instituição / disciplina</b>${escapeHtml(identity.institution || '—')}</div><div><b>Sessão / categoria</b>${escapeHtml([identity.session, identity.category].filter(Boolean).join(' · ') || '—')}</div></div><div class="meta"><div><b>Lâmina</b>${escapeHtml(payload.slide.name)}</div><div><b>Dimensões</b>${escapeHtml(payload.slide.width)} × ${escapeHtml(payload.slide.height)} px</div><div><b>Ampliação</b>${state.objectivePower ? `${escapeHtml(state.objectivePower)}×` : 'não informado'}</div><div><b>MPP</b>${payload.slide.mppX ? `${escapeHtml(payload.slide.mppX)} µm/px` : 'não informado'}</div></div>${imageSection}${measurementSection}${annotationSection}${lessonSection}</div><footer class="foot"><span>Gerado pelo Virtum SVS Viewer</span><span>${escapeHtml(new Date().toLocaleString('pt-BR'))}</span></footer><div class="no-print"><button onclick="window.print()">Imprimir / Salvar em PDF</button></div></article></body></html>`;
+  </style></head><body><article class="page"><header class="head"><h1>${escapeHtml(identity.title)}</h1><p>Virtum SVS Viewer · relatório local · v0.5.3.1</p></header><div class="content"><div class="identity"><div><b>Professor(a)</b>${escapeHtml(identity.professor || '—')}</div><div><b>Aluno(a)</b>${escapeHtml(identity.student || '—')}</div><div><b>Instituição / disciplina</b>${escapeHtml(identity.institution || '—')}</div><div><b>Sessão / categoria</b>${escapeHtml([identity.session, identity.category].filter(Boolean).join(' · ') || '—')}</div></div><div class="meta"><div><b>Lâmina</b>${escapeHtml(payload.slide.name)}</div><div><b>Dimensões</b>${escapeHtml(payload.slide.width)} × ${escapeHtml(payload.slide.height)} px</div><div><b>Ampliação</b>${state.objectivePower ? `${escapeHtml(state.objectivePower)}×` : 'não informado'}</div><div><b>MPP</b>${payload.slide.mppX ? `${escapeHtml(payload.slide.mppX)} µm/px` : 'não informado'}</div></div>${imageSection}${measurementSection}${annotationSection}${lessonSection}</div><footer class="foot"><span>Gerado pelo Virtum SVS Viewer</span><span>${escapeHtml(new Date().toLocaleString('pt-BR'))}</span></footer><div class="no-print"><button onclick="window.print()">Imprimir / Salvar em PDF</button></div></article></body></html>`;
 }
 
 async function exportHtmlReport() {
@@ -4635,7 +4644,7 @@ async function exportPdfReport() {
     const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
     const pageWidth = pdf.internal.pageSize.getWidth();
     const contentWidth = pageWidth - 28;
-    pdfPageHeader(pdf, identity.title, 'Virtum SVS Viewer · Reports & Export · v0.5.3');
+    pdfPageHeader(pdf, identity.title, 'Virtum SVS Viewer · Reports & Export · v0.5.3.1');
     let y = 31;
 
     const identityRows = [
@@ -4964,14 +4973,33 @@ function toggleSidebar() {
   else openSidebar();
 }
 
+let overlayRedrawFrame = 0;
+let diagnosticsTimer = 0;
+
+function scheduleDiagnosticsUpdate(delay = 120) {
+  if (diagnosticsTimer) return;
+  diagnosticsTimer = window.setTimeout(() => {
+    diagnosticsTimer = 0;
+    updateDiagnostics();
+    updateStartupDiagnostics();
+  }, delay);
+}
+
 function redrawOverlays() {
   renderMeasurements();
   renderAnnotations();
   updateScaleBar();
   updateZoomText();
-  applyQualityModeSettings();
   updateQualityInfo();
-  updateDiagnostics();
+  scheduleDiagnosticsUpdate();
+}
+
+function scheduleRedrawOverlays() {
+  if (overlayRedrawFrame) return;
+  overlayRedrawFrame = window.requestAnimationFrame(() => {
+    overlayRedrawFrame = 0;
+    redrawOverlays();
+  });
 }
 
 viewer.addHandler('open', () => {
@@ -4998,13 +5026,14 @@ viewer.addHandler('open', () => {
   } else {
     resetHistory();
   }
+  applyQualityModeSettings();
   redrawOverlays();
 });
-viewer.addHandler('zoom', redrawOverlays);
-viewer.addHandler('pan', redrawOverlays);
-viewer.addHandler('animation', redrawOverlays);
-viewer.addHandler('rotate', redrawOverlays);
-viewer.addHandler('resize', redrawOverlays);
+viewer.addHandler('zoom', scheduleRedrawOverlays);
+viewer.addHandler('pan', scheduleRedrawOverlays);
+viewer.addHandler('animation', scheduleRedrawOverlays);
+viewer.addHandler('rotate', scheduleRedrawOverlays);
+viewer.addHandler('resize', scheduleRedrawOverlays);
 viewer.addHandler('canvas-move', updatePosition);
 viewer.addHandler('canvas-exit', () => { ui.positionText.textContent = 'Posição —'; });
 viewer.addHandler('canvas-click', (event) => {

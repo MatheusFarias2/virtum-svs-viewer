@@ -1,6 +1,6 @@
 # OpenSlide WASM Mobile · Virtum
 
-O Virtum v0.5.3 consegue usar um build específico do `openslide-js` em tablets.
+O Virtum v0.5.3.1 consegue usar um build específico do `openslide-js` em tablets.
 O código do visualizador procura primeiro por:
 
 - `/wasm-mobile/manifest.json`
