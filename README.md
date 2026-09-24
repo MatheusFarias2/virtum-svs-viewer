@@ -1,30 +1,22 @@
-# Virtum SVS Viewer v0.5.3.2 · Adaptive Fast Start
+# Virtum SVS Viewer v0.5.3.3 · Progressive Open
 
-Atualização focada em reduzir o tempo até a primeira imagem em tablets, Chromebooks e PCs de baixo consumo sem voltar aos erros de memória.
+Versão focada na abertura de lâminas SVS maiores em tablet, Chromebook e PCs modestos.
 
 ## Novidades
 
-- Perfil **Low Power** específico para Chromebook e hardware modesto.
-- Chromebook não entra mais automaticamente no modo de memória ultraconservador apenas por não informar `deviceMemory`.
-- Low Power: 1 worker WASM, blocos de 2 MiB, broker 32 MiB, 2 leituras simultâneas, read-ahead 2, fila visual 2 e cache visual 32 tiles.
-- Mobile mantém o caminho seguro e rápido da v0.5.3.1.
-- Navigator desligado e `immediateRender` ativado também em dispositivos Low Power.
-- `minPixelRatio` otimizado para priorizar a primeira visualização em hardware restrito.
-- Benchmark passa a distinguir **Mobile / Low Power / Balanced / Strong**.
-- Cronometragem do tempo total até a primeira imagem no diagnóstico e status.
-- Cache de benchmark versionado novamente para forçar uma nova avaliação na primeira execução.
+- **Progressive Open** para lâminas a partir de 100 MiB.
+- **Large Slide Mode** a partir de 300 MiB.
+- Geração de **preview de baixa resolução em um único tile** antes do detalhamento completo.
+- O preview fica visível enquanto o OpenSeadragon refina a imagem.
+- I/O compartilhado passa a ser priorizado em mobile, Chromebook/Low Power e lâminas grandes.
+- Ajuste adaptativo de block size, cache do broker, leituras simultâneas e read-ahead conforme tamanho da lâmina.
+- Diagnóstico registra separadamente tempo de cabeçalho, preview e primeira imagem detalhada.
+- Mantém 1 worker WASM em hardware limitado para preservar a estabilidade obtida na série v0.5.3.
 
-## Meta desta versão
+## Faixas de abertura
 
-Usar a mesma lâmina de teste para comparar o tempo até a primeira imagem. O objetivo principal é diminuir especialmente o tempo em Chromebook sem aumentar agressivamente workers ou memória.
+- `< 100 MiB`: Fast Start normal.
+- `100–299 MiB`: Progressive Open.
+- `>= 300 MiB`: Large Slide.
 
-## Execução local
-
-```bash
-npm install
-npm run dev
-```
-
-## Vercel
-
-O projeto continua Vercel-ready e mantém os headers necessários para OpenSlide/WASM.
+O arquivo SVS continua sendo processado localmente no navegador. Nenhuma lâmina é enviada à Vercel.

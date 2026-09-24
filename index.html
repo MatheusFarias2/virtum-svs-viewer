@@ -19,7 +19,7 @@
         <img src="./assets/icon.svg" alt="" width="30" height="30" />
         <div class="brand-copy">
           <strong>Virtum SVS Viewer</strong>
-          <span>v0.5.3.2 · Mobile Fast Start</span>
+          <span>v0.5.3.3 · Progressive Open</span>
         </div>
       </div>
 
@@ -370,6 +370,8 @@
         </div>
         <div class="primary-pane-label"><span class="compare-letter">A</span><span id="primaryCompareName">Lâmina principal</span></div>
         <div id="viewer" class="viewer"></div>
+        <canvas id="progressivePreview" class="progressive-preview" aria-hidden="true" hidden></canvas>
+        <div id="progressiveBadge" class="progressive-badge" role="status" aria-live="polite" hidden>Preview pronto · refinando…</div>
         <svg id="measurementOverlay" class="measurement-overlay" aria-hidden="true"></svg>
         <svg id="annotationOverlay" class="annotation-overlay" aria-hidden="true"></svg>
 
