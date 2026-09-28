@@ -1,63 +1,33 @@
-# Virtum SVS Viewer v0.5.3.4 · Heavy Slide Mobile
+# Virtum SVS Viewer v0.5.3.5 · Heavy Safe Progressive
 
-Versão focada em **lâminas SVS pesadas no mobile e em hardware Low Power**, especialmente arquivos a partir de **250 MiB**. A base de compatibilidade e o Mobile WASM da série v0.5.3 foram preservados.
+Hotfix de estabilidade para lâminas SVS pesadas em tablet/Chromebook, especialmente a partir de 250 MB.
 
-## Objetivo
+## O que mudou
 
-Reduzir o tempo até a **primeira imagem visível** sem voltar ao erro de memória que ocorria nos tablets. O Viewer continua usando apenas **1 worker WASM** em dispositivos limitados; a otimização está na prioridade das requisições e no fluxo de abertura.
+- Remove o preview manual concorrente em lâminas >=250 MB em mobile/low-power.
+- Evita o cenário em que um preview abortado continua ocupando o único worker WASM enquanto o Deep Zoom espera.
+- Heavy (250–599 MB): 1 worker, bloco 1 MiB, broker 24 MiB, 2 leituras, read-ahead 1.
+- Ultra Safe (600 MB+): 1 worker, bloco 1 MiB, broker 16 MiB, 1 leitura, sem read-ahead.
+- Fila inicial: 2 em Heavy e 1 em Ultra Safe.
+- Cache inicial: 20 tiles em Heavy e 12 em Ultra Safe.
+- O primeiro conteúdo visível passa a vir do próprio OpenSeadragon/Deep Zoom nas lâminas pesadas.
+- Mantém Progressive Preview somente para 100–249 MB, faixa que já vinha funcionando bem.
 
-## Faixas de abertura
+## Motivo da correção
 
-- `< 100 MiB`: Fast Start normal.
-- `100–249 MiB`: Progressive Open.
-- `250–599 MiB`: **Heavy Mobile**.
-- `>= 600 MiB`: **Ultra Heavy**.
+A v0.5.3.4 aumentou agressividade de I/O em >=250 MB e ainda podia iniciar um preview separado antes do Deep Zoom. Em dispositivos limitados, isso podia pressionar memória e, principalmente, monopolizar o único worker de decodificação. A v0.5.3.5 prioriza previsibilidade e abertura real antes de aquecer o restante.
 
-## Heavy Mobile
+## Faixas
 
-Para arquivos de 250 MiB ou mais em tablet/Chromebook/Low Power:
+- <100 MB: Fast Start
+- 100–249 MB: Progressive
+- 250–599 MB: Heavy Safe
+- >=600 MB: Ultra Safe
 
-- 1 worker WASM, evitando duplicação pesada de memória.
-- I/O compartilhado com broker e cache moderado.
-- Blocos de leitura de 2 MiB.
-- Até 3 leituras de arquivo em andamento no broker.
-- Read-ahead controlado para não disputar excessivamente com o primeiro tile.
-- **Fila de renderização temporariamente limitada a 1** durante a primeira imagem.
-- Cache visual inicial reduzido para 16 tiles.
-- Assim que o primeiro tile aparece, a fila/cache retornam automaticamente ao perfil adaptativo normal.
-- Preview progressivo recebe apenas **2,2 s** de orçamento. Se não sair rapidamente, é cancelado para o Deep Zoom assumir.
+## Teste sugerido
 
-## Ultra Heavy
+Use primeiro a mesma lâmina de 264 MB que travava na v0.5.3.4. Meça até a primeira imagem e depois teste zoom/pan por 30–60 segundos.
 
-Em dispositivos limitados, arquivos a partir de 600 MiB **pulam o preview adicional**. Isso evita decodificar uma imagem provisória e logo depois repetir trabalho no OpenSeadragon.
+## Vercel
 
-O fluxo passa a ser:
-
-```text
-Cabeçalho
-   ↓
-Deep Zoom imediatamente
-   ↓
-1 tile prioritário
-   ↓
-Primeira imagem visível
-   ↓
-Fila/cache expandem
-   ↓
-Refinamento normal
-```
-
-## Diagnóstico
-
-A aba de diagnóstico continua mostrando:
-
-- tempo de cabeçalho;
-- tempo do preview, quando usado;
-- tempo até a primeira imagem detalhada;
-- perfil de abertura (`Fast Start`, `Progressive`, `Heavy Mobile`, `Ultra Heavy`);
-- fila atual e fila usada no startup;
-- cache, worker, broker e engine WASM.
-
-## Privacidade
-
-O `.SVS` continua sendo processado localmente no navegador. A Vercel hospeda apenas o Viewer; a lâmina não é enviada ao servidor.
+O projeto continua pronto para Vercel, mantendo COOP/COEP e o Mobile WASM da linha v0.5.3.
