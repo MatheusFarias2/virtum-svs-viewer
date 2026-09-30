@@ -7,7 +7,10 @@ import OpenSeadragon from 'openseadragon';
 export function createOpenSlideTileSource(generators, slideName, hooks = {}) {
   const dz = generators[0];
   const info = dz.getDziInfo('jpeg');
-  const maxLevel = dz.levelCount - 1;
+  const fullMaxLevel = dz.levelCount - 1;
+  let maxLevelCap = Number.isFinite(hooks.initialMaxLevel)
+    ? Math.max(0, Math.min(fullMaxLevel, Math.floor(hooks.initialMaxLevel)))
+    : fullMaxLevel;
   const levelDimensions = dz.levelDimensions;
   const levelTiles = dz.levelTiles;
   let roundRobin = 0;
@@ -19,7 +22,7 @@ export function createOpenSlideTileSource(generators, slideName, hooks = {}) {
     tileHeight: info.tileSize,
     tileOverlap: info.overlap,
     minLevel: 0,
-    maxLevel,
+    maxLevel: maxLevelCap,
   });
 
   const ts = tileSource;
@@ -41,8 +44,21 @@ export function createOpenSlideTileSource(generators, slideName, hooks = {}) {
   };
 
   ts.tileExists = (level, x, y) => {
+    if (level > maxLevelCap) return false;
     const tiles = levelTiles[level];
     return Boolean(tiles && x >= 0 && y >= 0 && x < tiles.columns && y < tiles.rows);
+  };
+
+  ts.getFullMaxLevel = () => fullMaxLevel;
+  ts.getMaxLevelCap = () => maxLevelCap;
+  ts.setMaxLevelCap = (nextLevel) => {
+    const numeric = Number(nextLevel);
+    if (!Number.isFinite(numeric)) return false;
+    const next = Math.max(0, Math.min(fullMaxLevel, Math.floor(numeric)));
+    if (next === maxLevelCap) return false;
+    maxLevelCap = next;
+    ts.maxLevel = next;
+    return true;
   };
 
   ts.downloadTileStart = (context) => {

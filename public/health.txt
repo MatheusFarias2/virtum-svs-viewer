@@ -1,3 +1,3 @@
-Virtum SVS Viewer v0.5.3.5
+Virtum SVS Viewer v0.5.3.6
 status=ok
 build=heavy-slide-mobile

@@ -1,33 +1,30 @@
-# Virtum SVS Viewer v0.5.3.5 · Heavy Safe Progressive
+# Virtum SVS Viewer v0.5.3.6 · Coarse First View
 
-Hotfix de estabilidade para lâminas SVS pesadas em tablet/Chromebook, especialmente a partir de 250 MB.
+Patch focado em tablets e dispositivos de baixa potência que travavam ao abrir lâminas acima de aproximadamente 200 MB.
 
-## O que mudou
+## Mudanças principais
 
-- Remove o preview manual concorrente em lâminas >=250 MB em mobile/low-power.
-- Evita o cenário em que um preview abortado continua ocupando o único worker WASM enquanto o Deep Zoom espera.
-- Heavy (250–599 MB): 1 worker, bloco 1 MiB, broker 24 MiB, 2 leituras, read-ahead 1.
-- Ultra Safe (600 MB+): 1 worker, bloco 1 MiB, broker 16 MiB, 1 leitura, sem read-ahead.
-- Fila inicial: 2 em Heavy e 1 em Ultra Safe.
-- Cache inicial: 20 tiles em Heavy e 12 em Ultra Safe.
-- O primeiro conteúdo visível passa a vir do próprio OpenSeadragon/Deep Zoom nas lâminas pesadas.
-- Mantém Progressive Preview somente para 100–249 MB, faixa que já vinha funcionando bem.
-
-## Motivo da correção
-
-A v0.5.3.4 aumentou agressividade de I/O em >=250 MB e ainda podia iniciar um preview separado antes do Deep Zoom. Em dispositivos limitados, isso podia pressionar memória e, principalmente, monopolizar o único worker de decodificação. A v0.5.3.5 prioriza previsibilidade e abertura real antes de aquecer o restante.
+- O modo pesado começa em **200 MB**.
+- Em mobile/Low Power, lâminas >= 200 MB usam **Coarse First View**.
+- A primeira tela limita o Deep Zoom a um nível da pirâmide com aproximadamente 2048 px no mobile.
+- Ao ampliar:
+  - a partir de ~1,35× do zoom inicial, libera detalhe intermediário;
+  - a partir de ~2,6×, libera a resolução completa.
+- A resolução completa não é carregada em repouso, reduzindo picos de RAM e decodificação.
+- Mobile pesado fica com:
+  - 1 worker;
+  - 1 leitura simultânea;
+  - broker de 16 MiB (12 MiB em Ultra Safe);
+  - fila visual 1;
+  - cache visual reduzido;
+  - read-ahead desligado.
+- Coordenadas, medições e anotações continuam usando as dimensões originais da lâmina.
 
 ## Faixas
 
-- <100 MB: Fast Start
-- 100–249 MB: Progressive
-- 250–599 MB: Heavy Safe
-- >=600 MB: Ultra Safe
+- < 100 MB: Fast Start
+- 100–199 MB: Progressive
+- 200–599 MB: Heavy Safe + Coarse First View em mobile/Low Power
+- >= 600 MB: Ultra Safe + Coarse First View
 
-## Teste sugerido
-
-Use primeiro a mesma lâmina de 264 MB que travava na v0.5.3.4. Meça até a primeira imagem e depois teste zoom/pan por 30–60 segundos.
-
-## Vercel
-
-O projeto continua pronto para Vercel, mantendo COOP/COEP e o Mobile WASM da linha v0.5.3.
+O SVS continua 100% local no dispositivo.
