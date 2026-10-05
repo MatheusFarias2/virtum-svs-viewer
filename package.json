@@ -1,14 +1,15 @@
 {
   "name": "virtum-svs-viewer",
   "private": true,
-  "version": "0.5.3.6",
+  "version": "0.5.4.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "build:vercel": "vite build && node scripts/verify-dist.mjs",
     "verify:dist": "node scripts/verify-dist.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:scheduler": "node scripts/test-smart-tile-scheduler.mjs"
   },
   "dependencies": {
     "@computationalpathologygroup/openslide-js": "1.0.0-beta.4",

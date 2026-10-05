@@ -1,3 +1,3 @@
-Virtum SVS Viewer v0.5.3.6
+Virtum SVS Viewer v0.5.4.2 · Smart Tile Scheduler
 status=ok
-build=heavy-slide-mobile
+build=smart-tile-scheduler

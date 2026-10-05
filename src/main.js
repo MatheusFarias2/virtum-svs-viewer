@@ -1,6 +1,7 @@
 import OpenSeadragon from 'openseadragon';
 import { OpenSlide, DeepZoomGenerator } from '@computationalpathologygroup/openslide-js';
 import { createOpenSlideTileSource } from './openslide-source.js';
+import { SmartTileScheduler } from './smart-tile-scheduler.js';
 
 const $ = (id) => document.getElementById(id);
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -231,13 +232,11 @@ const MOBILE_WASM_MANIFEST_URL = '/wasm-mobile/manifest.json';
 const MOBILE_DZI_TILE_SIZE = 254;
 const DESKTOP_DZI_TILE_SIZE = 254;
 const PROGRESSIVE_THRESHOLD_BYTES = 100 * 1024 * 1024;
-const HEAVY_SLIDE_THRESHOLD_BYTES = 200 * 1024 * 1024;
-const COARSE_FIRST_VIEW_THRESHOLD_BYTES = 200 * 1024 * 1024;
-const COARSE_MOBILE_TARGET_PX = 2048;
-const COARSE_LOW_POWER_TARGET_PX = 3072;
+const HEAVY_SLIDE_THRESHOLD_BYTES = 250 * 1024 * 1024;
 const ULTRA_HEAVY_SLIDE_THRESHOLD_BYTES = 600 * 1024 * 1024;
 const PROGRESSIVE_PREVIEW_TIMEOUT_MS = 5000;
-const HEAVY_PREVIEW_TIMEOUT_MS = 0; // v0.5.3.6: preview manual desativado em heavy mobile
+const HEAVY_PREVIEW_TIMEOUT_MS = 0; // preview manual desativado em heavy mobile
+const SMART_TILE_IDLE_MS = 400;
 const PREFS_KEY = 'virtum-svs-viewer-prefs-v035';
 const AUTOSAVE_INDEX_KEY = 'virtum-svs-viewer-autosave-index-v036';
 const AUTOSAVE_PREFIX = 'virtum-svs-viewer-autosave-v036:';
@@ -250,7 +249,7 @@ const SESSIONS_KEY = 'virtum-svs-sessions-v040';
 const LIBRARY_MAX_ITEMS = 40;
 const SESSION_MAX_ITEMS = 40;
 const LIBRARY_CATEGORIES = ['Histologia', 'Anatomia', 'Patologia', 'Outros'];
-const DEVICE_BENCHMARK_KEY = 'virtum-svs-device-benchmark-v0536';
+const DEVICE_BENCHMARK_KEY = 'virtum-svs-device-benchmark-v0533';
 const DEVICE_BENCHMARK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MEMORY_SAFE_CONFIG = {
   label: 'Mobile Fast Safe',
@@ -382,18 +381,20 @@ const state = {
   heavyStartupMode: 'standard',
   heavyStartupJobLimit: null,
   heavyStartupCacheCount: null,
-  coarseFirstViewActive: false,
-  coarseInitialLevel: null,
-  coarseMidLevel: null,
-  coarseFullLevel: null,
-  coarseTileSource: null,
-  coarseUnlockStage: 0,
-  coarseHomeZoom: null,
   tileRequested: 0,
   tileLoadedCount: 0,
   tileFailedCount: 0,
   tileAbortedCount: 0,
   tileLevelCounts: {},
+  tileSchedulerMoving: false,
+  tileSchedulerLastReason: 'standby',
+  tileSchedulerQueueClears: 0,
+  tileSchedulerDiscardedJobs: 0,
+  tileSchedulerMotionEvents: 0,
+  tileSchedulerQueuedJobs: 0,
+  tileSchedulerJobsInProgress: 0,
+  tileSchedulerJobLimit: 0,
+  tileSchedulerMaxTilesPerFrame: 1,
   projectDirty: false,
   activePanel: 'panel-slide',
   sidebarCollapsed: false,
@@ -435,6 +436,8 @@ const viewer = OpenSeadragon({
   animationTime: useFastRenderDefaults() ? 0.35 : 0.65,
   blendTime: useFastRenderDefaults() ? 0 : 0.08,
   immediateRender: useFastRenderDefaults(),
+  loadDestinationTilesOnAnimation: false,
+  maxTilesPerFrame: 1,
   minPixelRatio: useFastRenderDefaults() ? 1.25 : 0.5,
   constrainDuringPan: true,
   visibilityRatio: 0.12,
@@ -466,6 +469,8 @@ const compareViewer = OpenSeadragon({
   animationTime: useFastRenderDefaults() ? 0.3 : 0.45,
   blendTime: useFastRenderDefaults() ? 0 : 0.08,
   immediateRender: useFastRenderDefaults(),
+  loadDestinationTilesOnAnimation: false,
+  maxTilesPerFrame: 1,
   minPixelRatio: useFastRenderDefaults() ? 1.25 : 0.5,
   constrainDuringPan: true,
   visibilityRatio: 0.12,
@@ -485,6 +490,24 @@ const compareViewer = OpenSeadragon({
     dragToPan: true,
     clickToZoom: false,
     dblClickToZoom: true,
+  },
+});
+
+const smartTileScheduler = new SmartTileScheduler(viewer, {
+  idleDelayMs: SMART_TILE_IDLE_MS,
+  clearThrottleMs: 80,
+  getPolicy: () => smartTileSchedulerPolicy(),
+  onStateChange: (snapshot) => {
+    state.tileSchedulerMoving = snapshot.moving;
+    state.tileSchedulerLastReason = snapshot.lastReason;
+    state.tileSchedulerQueueClears = snapshot.queueClears;
+    state.tileSchedulerDiscardedJobs = snapshot.discardedQueuedJobs;
+    state.tileSchedulerMotionEvents = snapshot.motionEvents;
+    state.tileSchedulerQueuedJobs = snapshot.queuedJobs;
+    state.tileSchedulerJobsInProgress = snapshot.jobsInProgress;
+    state.tileSchedulerJobLimit = snapshot.jobLimit;
+    state.tileSchedulerMaxTilesPerFrame = snapshot.maxTilesPerFrame || 1;
+    scheduleDiagnosticsUpdate();
   },
 });
 
@@ -1511,6 +1534,7 @@ async function closeCurrentSlide() {
   state.heavyStartupReleased = false;
   state.heavyStartupJobLimit = null;
   state.heavyStartupCacheCount = null;
+  smartTileScheduler.reset();
   setMeasureMode(false);
   setAnnotationMode(null);
   if (ui.annotationDialog.open) closeAnnotationDialog();
@@ -1540,13 +1564,6 @@ async function closeCurrentSlide() {
   state.tileLevelCounts = {};
   state.pendingSlideBytes = 0;
   state.progressiveMode = 'standard';
-  state.coarseFirstViewActive = false;
-  state.coarseInitialLevel = null;
-  state.coarseMidLevel = null;
-  state.coarseFullLevel = null;
-  state.coarseTileSource = null;
-  state.coarseUnlockStage = 0;
-  state.coarseHomeZoom = null;
 
   for (const slide of oldSlides) {
     try {
@@ -1865,22 +1882,22 @@ function tuneEngineForSlide(settings) {
   const mobile = detectMobileDevice() || state.memorySafeMode;
   const lowPower = detectLowPowerDesktop();
 
-  // v0.5.3.6: o perfil pesado anterior aumentava bloco/cache/leituras justamente
+  // O perfil pesado anterior aumentava bloco/cache/leituras justamente
   // quando o Android já estava perto do limite do processo. Em alguns tablets isso
   // congelava o único worker WASM antes do primeiro tile. Para >=250 MB usamos uma
   // faixa estável e previsível: 1 worker, blocos de 1 MiB e pouca concorrência.
   if (mobile) {
     tuned.workerCount = 1;
     if (mode === 'ultra-heavy') {
-      tuned.blockSize = 512 * 1024;
-      tuned.brokerCacheBytes = 12 * 1024 * 1024;
-      tuned.maxConcurrentReads = 1;
-      tuned.readAhead = 0;
-    } else if (mode === 'heavy') {
       tuned.blockSize = 1024 * 1024;
       tuned.brokerCacheBytes = 16 * 1024 * 1024;
       tuned.maxConcurrentReads = 1;
       tuned.readAhead = 0;
+    } else if (mode === 'heavy') {
+      tuned.blockSize = 1024 * 1024;
+      tuned.brokerCacheBytes = 24 * 1024 * 1024;
+      tuned.maxConcurrentReads = 2;
+      tuned.readAhead = 1;
     } else {
       tuned.blockSize = 1024 * 1024;
       tuned.brokerCacheBytes = 24 * 1024 * 1024;
@@ -1900,89 +1917,6 @@ function tuneEngineForSlide(settings) {
     tuned.readAhead = Math.max(tuned.readAhead || 0, 2);
   }
   return tuned;
-}
-
-
-function shouldUseCoarseFirstView(bytes = state.pendingSlideBytes || state.currentFile?.size || 0) {
-  if (!Number.isFinite(bytes) || bytes < COARSE_FIRST_VIEW_THRESHOLD_BYTES) return false;
-  return detectMobileDevice() || state.memorySafeMode || detectLowPowerDesktop();
-}
-
-function levelForTargetPixels(generator, targetPixels) {
-  const dims = generator?.levelDimensions || [];
-  if (!dims.length) return 0;
-  let chosen = 0;
-  for (let level = 0; level < dims.length; level += 1) {
-    const dim = dims[level];
-    const longest = Math.max(Number(dim?.width || 0), Number(dim?.height || 0));
-    if (longest <= targetPixels) chosen = level;
-    else break;
-  }
-  return Math.max(0, Math.min(dims.length - 1, chosen));
-}
-
-function prepareCoarseFirstView(generator, bytes = state.pendingSlideBytes || 0) {
-  state.coarseFirstViewActive = false;
-  state.coarseInitialLevel = null;
-  state.coarseMidLevel = null;
-  state.coarseFullLevel = null;
-  state.coarseTileSource = null;
-  state.coarseUnlockStage = 0;
-  state.coarseHomeZoom = null;
-
-  if (!shouldUseCoarseFirstView(bytes) || !generator) return null;
-
-  const fullLevel = Math.max(0, (generator.levelCount || 1) - 1);
-  const initialTarget = (detectMobileDevice() || state.memorySafeMode)
-    ? COARSE_MOBILE_TARGET_PX
-    : COARSE_LOW_POWER_TARGET_PX;
-  const midTarget = Math.max(initialTarget * 2, 4096);
-  const initialLevel = Math.min(fullLevel, levelForTargetPixels(generator, initialTarget));
-  const midLevel = Math.min(fullLevel, Math.max(initialLevel, levelForTargetPixels(generator, midTarget)));
-
-  state.coarseFirstViewActive = initialLevel < fullLevel;
-  state.coarseInitialLevel = initialLevel;
-  state.coarseMidLevel = midLevel;
-  state.coarseFullLevel = fullLevel;
-  state.coarseUnlockStage = 0;
-
-  if (state.coarseFirstViewActive) {
-    const dim = generator.levelDimensions?.[initialLevel];
-    setStartupPhase(`Coarse First View · nível ${initialLevel}/${fullLevel} · ${dim?.width || '?'}×${dim?.height || '?'}`);
-  }
-  return state.coarseFirstViewActive ? { initialLevel, midLevel, fullLevel } : null;
-}
-
-function setCoarseResolutionLevel(level, stage = state.coarseUnlockStage) {
-  const source = state.coarseTileSource;
-  if (!state.coarseFirstViewActive || !source?.setMaxLevelCap) return false;
-  const target = Math.max(0, Math.min(state.coarseFullLevel ?? level, level));
-  const changed = source.setMaxLevelCap(target);
-  state.coarseUnlockStage = Math.max(state.coarseUnlockStage, stage);
-  if (changed) {
-    try { viewer.forceRedraw?.(); } catch {}
-    scheduleDiagnosticsUpdate(30);
-  }
-  return changed;
-}
-
-function maybeUnlockCoarseResolution() {
-  if (!state.coarseFirstViewActive || !state.coarseTileSource || !hasOpenSlide()) return;
-  const home = state.coarseHomeZoom || viewer.viewport.getHomeZoom?.() || 0;
-  const current = viewer.viewport.getZoom?.(true) || 0;
-  if (!(home > 0) || !(current > 0)) return;
-  const ratio = current / home;
-
-  if (ratio >= 2.6 && state.coarseUnlockStage < 2) {
-    setCoarseResolutionLevel(state.coarseFullLevel, 2);
-    setStartupPhase('Detalhe completo liberado sob demanda');
-    return;
-  }
-  if (ratio >= 1.35 && state.coarseUnlockStage < 1) {
-    const mid = Math.max(state.coarseInitialLevel, state.coarseMidLevel ?? state.coarseInitialLevel);
-    setCoarseResolutionLevel(mid, 1);
-    setStartupPhase(`Detalhe intermediário liberado · nível ${mid}/${state.coarseFullLevel}`);
-  }
 }
 
 function previewBudgetForSlide(mode = slideStartupMode()) {
@@ -2005,14 +1939,14 @@ function activateHeavyStartupThrottle(mode = slideStartupMode()) {
 
   // Heavy mantém duas solicitações no máximo para que o broker possa preparar
   // a próxima leitura sem formar uma fila longa no decoder. Ultra Heavy usa uma só.
-  const mobileHeavy = detectMobileDevice() || state.memorySafeMode;
-  const jobLimit = mobileHeavy ? 1 : (mode === 'ultra-heavy' ? 1 : 2);
-  const cacheCount = mobileHeavy ? (mode === 'ultra-heavy' ? 8 : 12) : (mode === 'ultra-heavy' ? 12 : 20);
+  const jobLimit = mode === 'ultra-heavy' ? 1 : 2;
+  const cacheCount = mode === 'ultra-heavy' ? 12 : 20;
   state.heavyStartupJobLimit = jobLimit;
   state.heavyStartupCacheCount = cacheCount;
   if (viewer.imageLoader) viewer.imageLoader.jobLimit = jobLimit;
   applyTileCacheLimit(viewer, cacheCount);
-  setStartupPhase(`${startupModeLabel(mode)} · priorizando primeira imagem · fila ${jobLimit}`);
+  smartTileScheduler.syncPolicy();
+  setStartupPhase(`${startupModeLabel(mode)} · priorizando primeira imagem · fila ${jobLimit} · scheduler centro-primeiro`);
 }
 
 function releaseHeavyStartupThrottle(reason = 'first-view') {
@@ -2020,12 +1954,6 @@ function releaseHeavyStartupThrottle(reason = 'first-view') {
   state.heavyStartupReleased = true;
   state.heavyStartupActive = false;
   window.setTimeout(() => {
-    if (isHeavySlideMode(state.heavyStartupMode) && (detectMobileDevice() || state.memorySafeMode)) {
-      if (viewer.imageLoader) viewer.imageLoader.jobLimit = 1;
-      applyTileCacheLimit(viewer, state.heavyStartupMode === 'ultra-heavy' ? 8 : 12);
-      scheduleDiagnosticsUpdate();
-      return;
-    }
     applyPerformanceProfile(true);
     scheduleDiagnosticsUpdate();
   }, reason === 'first-view' ? 350 : 0);
@@ -2252,7 +2180,7 @@ function startupDiagnosticText() {
   const engine = engineSettingsForCurrentMode();
   const benchmark = state.deviceBenchmark;
   return [
-    'Virtum SVS Viewer v0.5.3.6 · Heavy Safe Progressive',
+    'Virtum SVS Viewer v0.5.4.2 · Smart Tile Scheduler',
     `Data: ${new Date().toLocaleString('pt-BR')}`,
     `UA: ${navigator.userAgent || '—'}`,
     `Móvel/tablet: ${detectMobileDevice()}`,
@@ -2270,6 +2198,8 @@ function startupDiagnosticText() {
     `Block size: ${Math.round((engine.blockSize || 1024 * 1024) / 1024)} KiB`,
     `Broker cache: ${Math.round(engine.brokerCacheBytes / (1024 * 1024))} MiB`,
     `Fase: ${state.startupPhase}`,
+    `Smart Tile Scheduler: ${state.tileSchedulerMoving ? 'movimento' : 'ocioso/refino'} · fila ${state.tileSchedulerJobLimit || viewer.imageLoader?.jobLimit || '?'} · max/frame ${state.tileSchedulerMaxTilesPerFrame || 1}`,
+    `Scheduler descartes: ${state.tileSchedulerDiscardedJobs} jobs em ${state.tileSchedulerQueueClears} limpezas de fila`,
     `Primeiro tile: ${state.firstTileTotalMs == null ? '—' : `${Math.round(state.firstTileTotalMs)} ms`} · decode ${state.firstTileDecodeMs == null ? '—' : `${Math.round(state.firstTileDecodeMs)} ms`} · bitmap ${state.firstTileBitmapMs == null ? '—' : `${Math.round(state.firstTileBitmapMs)} ms`}`,
     `Probe WASM: ${wasmProbeText()}`,
     `Último erro: ${state.lastEngineError || '—'}`,
@@ -2693,7 +2623,6 @@ async function openSvs(file) {
     setStartupPhase('Criando pirâmide Deep Zoom');
     const mobileTileSize = (detectMobileDevice() || state.memorySafeMode) ? MOBILE_DZI_TILE_SIZE : DESKTOP_DZI_TILE_SIZE;
     state.generators = [new DeepZoomGenerator(slide, { tileSize: mobileTileSize, overlap: 1 })];
-    const coarsePlan = prepareCoarseFirstView(state.generators[0], file.size || 0);
     activateHeavyStartupThrottle(state.progressiveMode);
 
     // A prévia manual continua útil entre 100–249 MB. Em >=250 MB no mobile/
@@ -2724,7 +2653,6 @@ async function openSvs(file) {
     state.tileAbortedCount = 0;
     state.tileLevelCounts = {};
     const tileSource = createOpenSlideTileSource(state.generators, file.name, {
-      initialMaxLevel: coarsePlan?.initialLevel,
       onTileStart: ({ level, startedAt }) => {
         state.tileRequested += 1;
         if (!state.firstTileRequestedAt) {
@@ -2754,12 +2682,11 @@ async function openSvs(file) {
       onTileError: ({ error }) => { state.tileFailedCount += 1; state.lastEngineError = error?.message || String(error || 'Falha de tile'); scheduleDiagnosticsUpdate(); },
       onTileAbort: () => { state.tileAbortedCount += 1; scheduleDiagnosticsUpdate(); },
     });
-    state.coarseTileSource = coarsePlan ? tileSource : null;
     state.tileLoaded = false;
     state.tileErrors = 0;
     state.rotation = 0;
     state.awaitingFirstTile = true;
-    setStartupPhase(`Aguardando primeira imagem · ${state.coarseFirstViewActive ? 'Coarse First View' : startupModeLabel(state.progressiveMode)} · ${detectMobileDevice() ? 'mobile' : detectLowPowerDesktop() ? 'low power' : 'desktop'} · fila ${viewer.imageLoader?.jobLimit || '?'}`);
+    setStartupPhase(`Aguardando primeira imagem · ${startupModeLabel(state.progressiveMode)} · ${detectMobileDevice() ? 'mobile' : detectLowPowerDesktop() ? 'low power' : 'desktop'} · fila ${state.heavyStartupJobLimit || viewer.imageLoader?.jobLimit || '?'} · scheduler centro-primeiro`);
     viewer.open(tileSource);
     ui.emptyState.hidden = true;
     setViewerControlsEnabled(true);
@@ -2859,6 +2786,42 @@ function currentProfileConfig() {
     manual.tileCacheCount = Math.min(manual.tileCacheCount, 96);
   }
   return manual;
+}
+
+function smartTileSchedulerPolicy() {
+  const cfg = currentProfileConfig();
+  const compareActive = hasCompareSlide();
+  const minimumJobs = state.memorySafeMode ? 1 : 2;
+  const baseJobLimit = Math.max(minimumJobs, Math.round((cfg.jobLimit || 2) * (compareActive ? 0.68 : 1)));
+  let idleJobLimit = Math.max(minimumJobs, Math.round(baseJobLimit * (state.runtimeThrottle || 1)));
+
+  if (state.heavyStartupActive && state.heavyStartupJobLimit) {
+    idleJobLimit = state.heavyStartupJobLimit;
+  }
+
+  const constrained = detectMobileDevice() || state.memorySafeMode || detectLowPowerDesktop();
+  const heavy = isHeavySlideMode(state.progressiveMode);
+  const movingJobLimit = constrained ? 1 : Math.max(1, Math.min(2, idleJobLimit));
+  const idleMaxTilesPerFrame = state.heavyStartupActive
+    ? 1
+    : constrained
+      ? (heavy ? 2 : 2)
+      : 3;
+
+  const idlePreload = !state.heavyStartupActive
+    && !state.memorySafeMode
+    && !detectMobileDevice()
+    && (cfg.preload || state.highDefinition)
+    && !(compareActive && state.deviceBenchmark?.tier === 'lite');
+
+  return {
+    movingJobLimit,
+    idleJobLimit,
+    movingMaxTilesPerFrame: 1,
+    idleMaxTilesPerFrame,
+    idlePreload,
+    loadDestinationTilesOnAnimation: false,
+  };
 }
 
 function currentSlideInfo() {
@@ -2989,7 +2952,8 @@ function updateDiagnostics() {
   const currentDziLevel = currentDziMaxLevel !== null && info ? Math.max(0, currentDziMaxLevel - info.levelIndex) : null;
   const tileCountCurrent = currentDziLevel !== null ? (state.tileLevelCounts[currentDziLevel] || 0) : 0;
   ui.diagTiles.textContent = `ok ${state.tileLoadedCount} · falhas ${state.tileFailedCount} · abortos ${state.tileAbortedCount}${currentDziLevel !== null ? ` · nível ${tileCountCurrent}` : ''}`;
-  ui.diagCache.textContent = `${cfg.label} · cache ${cachedTiles}/${cacheCount}${compareActive ? '×2' : ''} · fila ${activeJobLimit} · preload ${preload ? 'ativo' : 'off'}${compareActive ? ' · compare' : ''}`;
+  const schedulerMode = state.tileSchedulerMoving ? 'movimento' : 'refino';
+  ui.diagCache.textContent = `${cfg.label} · cache ${cachedTiles}/${cacheCount}${compareActive ? '×2' : ''} · fila ${state.tileSchedulerJobLimit || activeJobLimit} · scheduler ${schedulerMode} ${state.tileSchedulerMaxTilesPerFrame || 1}/frame · descartes ${state.tileSchedulerDiscardedJobs}${preload ? ' · preload ativo' : ' · preload off'}${compareActive ? ' · compare' : ''}`;
 }
 
 function updateStartupDiagnostics() {
@@ -3025,7 +2989,7 @@ function updateStartupDiagnostics() {
     ui.startupDiagWorkers.textContent = `${engine.workerCount} · broker ${Math.round(engine.brokerCacheBytes / (1024 * 1024))} MB · bloco ${Math.round((engine.blockSize || 1024 * 1024) / 1024)} KiB`;
   }
   if (ui.startupDiagCache) {
-    ui.startupDiagCache.textContent = `${cacheCount} tiles · fila ${cfg.jobLimit} · preload ${state.memorySafeMode ? 'off' : (cfg.preload ? 'ativo' : 'off')}`;
+    ui.startupDiagCache.textContent = `${cacheCount} tiles · fila ${state.tileSchedulerJobLimit || cfg.jobLimit} · scheduler ${state.tileSchedulerMoving ? 'movimento' : 'refino'} ${state.tileSchedulerMaxTilesPerFrame || 1}/frame · preload ${state.memorySafeMode || state.tileSchedulerMoving ? 'off' : (cfg.preload ? 'ativo' : 'off')}`;
   }
   if (ui.startupDiagMemory) {
     ui.startupDiagMemory.textContent = state.memorySafeMode ? `Seguro · ${memorySafeReason()}` : 'Normal';
@@ -3152,6 +3116,9 @@ function applyPerformanceProfile(silent = false) {
   try { item?.setPreload?.(preload); } catch (_) {}
   try { compareItem?.setPreload?.(preload); } catch (_) {}
 
+  // O perfil define o teto geral; o Smart Tile Scheduler pode apertar esse
+  // teto temporariamente durante pan/zoom e o devolve após o período ocioso.
+  smartTileScheduler.syncPolicy();
   updateDiagnostics();
   if (!silent && hasOpenSlide()) {
     const label = state.performanceProfile === 'auto' ? `Automático (${tier.label})` : cfg.label;
@@ -4964,7 +4931,7 @@ function getReportHtml({ imageData = '' } = {}) {
   const lessonSection = opts.includeLesson && lessonRows ? `<section><h2>${escapeHtml(state.lessonTitle || 'Sequência do Modo Aula')}</h2><table><thead><tr><th>Etapa</th><th>Título</th><th>Observação</th></tr></thead><tbody>${lessonRows}</tbody></table></section>` : '';
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${escapeHtml(identity.title)}</title><style>
   *{box-sizing:border-box}body{font:14px Inter,system-ui,sans-serif;margin:0;color:#1f2530;background:#eef1f5}.page{max-width:920px;margin:24px auto;background:white;box-shadow:0 12px 42px #0002}.head{padding:30px 38px 24px;background:#151820;color:#fff;border-top:7px solid #d92335}.head h1{margin:0;font-size:27px}.head p{margin:6px 0 0;color:#b9c0ca}.content{padding:28px 38px 38px}.identity{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:0 0 20px}.identity div,.meta div{padding:10px 12px;background:#f4f6f8;border-radius:8px}.identity b,.meta b{display:block;font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px}.meta{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:0 0 26px}.meta div{font-size:12px}.shot{display:block;width:100%;max-height:520px;object-fit:contain;border:1px solid #d8dde4;border-radius:10px;background:#f3f4f6}h2{font-size:16px;margin:28px 0 10px}table{border-collapse:collapse;width:100%;margin:0 0 20px}th,td{border-bottom:1px solid #e0e4ea;padding:9px 8px;text-align:left;vertical-align:top}th{font-size:10px;color:#667085;text-transform:uppercase}.num{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;color:white;font-weight:800}.foot{padding:16px 38px;border-top:1px solid #e2e6eb;color:#737b87;font-size:10px;display:flex;justify-content:space-between}.no-print{padding:0 38px 30px}@media(max-width:700px){.page{margin:0}.identity,.meta{grid-template-columns:1fr 1fr}.content,.head,.foot{padding-left:20px;padding-right:20px}}@media print{body{background:white}.page{max-width:none;margin:0;box-shadow:none}.no-print{display:none}@page{size:A4;margin:12mm}}
-  </style></head><body><article class="page"><header class="head"><h1>${escapeHtml(identity.title)}</h1><p>Virtum SVS Viewer · relatório local · v0.5.3.6</p></header><div class="content"><div class="identity"><div><b>Professor(a)</b>${escapeHtml(identity.professor || '—')}</div><div><b>Aluno(a)</b>${escapeHtml(identity.student || '—')}</div><div><b>Instituição / disciplina</b>${escapeHtml(identity.institution || '—')}</div><div><b>Sessão / categoria</b>${escapeHtml([identity.session, identity.category].filter(Boolean).join(' · ') || '—')}</div></div><div class="meta"><div><b>Lâmina</b>${escapeHtml(payload.slide.name)}</div><div><b>Dimensões</b>${escapeHtml(payload.slide.width)} × ${escapeHtml(payload.slide.height)} px</div><div><b>Ampliação</b>${state.objectivePower ? `${escapeHtml(state.objectivePower)}×` : 'não informado'}</div><div><b>MPP</b>${payload.slide.mppX ? `${escapeHtml(payload.slide.mppX)} µm/px` : 'não informado'}</div></div>${imageSection}${measurementSection}${annotationSection}${lessonSection}</div><footer class="foot"><span>Gerado pelo Virtum SVS Viewer</span><span>${escapeHtml(new Date().toLocaleString('pt-BR'))}</span></footer><div class="no-print"><button onclick="window.print()">Imprimir / Salvar em PDF</button></div></article></body></html>`;
+  </style></head><body><article class="page"><header class="head"><h1>${escapeHtml(identity.title)}</h1><p>Virtum SVS Viewer · relatório local · v0.5.4.2</p></header><div class="content"><div class="identity"><div><b>Professor(a)</b>${escapeHtml(identity.professor || '—')}</div><div><b>Aluno(a)</b>${escapeHtml(identity.student || '—')}</div><div><b>Instituição / disciplina</b>${escapeHtml(identity.institution || '—')}</div><div><b>Sessão / categoria</b>${escapeHtml([identity.session, identity.category].filter(Boolean).join(' · ') || '—')}</div></div><div class="meta"><div><b>Lâmina</b>${escapeHtml(payload.slide.name)}</div><div><b>Dimensões</b>${escapeHtml(payload.slide.width)} × ${escapeHtml(payload.slide.height)} px</div><div><b>Ampliação</b>${state.objectivePower ? `${escapeHtml(state.objectivePower)}×` : 'não informado'}</div><div><b>MPP</b>${payload.slide.mppX ? `${escapeHtml(payload.slide.mppX)} µm/px` : 'não informado'}</div></div>${imageSection}${measurementSection}${annotationSection}${lessonSection}</div><footer class="foot"><span>Gerado pelo Virtum SVS Viewer</span><span>${escapeHtml(new Date().toLocaleString('pt-BR'))}</span></footer><div class="no-print"><button onclick="window.print()">Imprimir / Salvar em PDF</button></div></article></body></html>`;
 }
 
 async function exportHtmlReport() {
@@ -5052,7 +5019,7 @@ async function exportPdfReport() {
     const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
     const pageWidth = pdf.internal.pageSize.getWidth();
     const contentWidth = pageWidth - 28;
-    pdfPageHeader(pdf, identity.title, 'Virtum SVS Viewer · Reports & Export · v0.5.3.6');
+    pdfPageHeader(pdf, identity.title, 'Virtum SVS Viewer · Reports & Export · v0.5.4.2');
     let y = 31;
 
     const identityRows = [
@@ -5412,7 +5379,6 @@ function scheduleRedrawOverlays() {
 
 viewer.addHandler('open', () => {
   viewer.viewport.goHome(true);
-  if (state.coarseFirstViewActive) state.coarseHomeZoom = viewer.viewport.getHomeZoom?.() || null;
   setViewerControlsEnabled(true);
   if (state.pendingAutosaveData) {
     try {
@@ -5436,14 +5402,19 @@ viewer.addHandler('open', () => {
     resetHistory();
   }
   applyQualityModeSettings();
+  smartTileScheduler.notifyOpen();
   redrawOverlays();
 });
 viewer.addHandler('zoom', scheduleRedrawOverlays);
-viewer.addHandler('zoom', maybeUnlockCoarseResolution);
 viewer.addHandler('pan', scheduleRedrawOverlays);
 viewer.addHandler('animation', scheduleRedrawOverlays);
 viewer.addHandler('rotate', scheduleRedrawOverlays);
 viewer.addHandler('resize', scheduleRedrawOverlays);
+viewer.addHandler('zoom', () => smartTileScheduler.notifyMotion('zoom'));
+viewer.addHandler('pan', () => smartTileScheduler.notifyMotion('pan'));
+viewer.addHandler('animation', () => smartTileScheduler.notifyMotion('animation'));
+viewer.addHandler('rotate', () => smartTileScheduler.notifyMotion('rotate'));
+viewer.addHandler('resize', () => smartTileScheduler.notifyMotion('resize'));
 viewer.addHandler('canvas-move', updatePosition);
 viewer.addHandler('canvas-exit', () => { ui.positionText.textContent = 'Posição —'; });
 viewer.addHandler('canvas-click', (event) => {
@@ -5482,12 +5453,10 @@ viewer.addHandler('tile-loaded', () => {
     const timing = state.firstTileTotalMs != null ? ` · tile ${Math.round(state.firstTileTotalMs)} ms` : '';
     const totalTiming = state.firstViewMs != null ? ` · detalhe ${(state.firstViewMs / 1000).toFixed(1)} s` : '';
     const previewPart = hadPreview && previewTiming != null ? ` · preview ${(previewTiming / 1000).toFixed(1)} s` : '';
-    const coarsePart = state.coarseFirstViewActive ? ` · leve ${state.coarseInitialLevel}/${state.coarseFullLevel}` : '';
-    setStartupPhase(`Lâmina pronta${previewPart}${timing}${totalTiming}${coarsePart}`);
+    setStartupPhase(`Lâmina pronta${previewPart}${timing}${totalTiming}`);
     if (state.currentFile) {
       const fastTiming = state.firstViewMs != null ? ` · ${(state.firstViewMs / 1000).toFixed(1)} s` : '';
-      const coarseStatus = state.coarseFirstViewActive ? ' · detalhe sob demanda' : '';
-      setStatus(`${state.currentFile.name} · pronta${fastTiming}${coarseStatus}${hadPreview && previewTiming != null ? ` · preview ${(previewTiming / 1000).toFixed(1)} s` : ''} · ${qualitySummaryText(screenPixelsPerImagePixel())}`);
+      setStatus(`${state.currentFile.name} · pronta${fastTiming}${hadPreview && previewTiming != null ? ` · preview ${(previewTiming / 1000).toFixed(1)} s` : ''} · ${qualitySummaryText(screenPixelsPerImagePixel())}`);
     }
   }
 });
