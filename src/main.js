@@ -5,6 +5,9 @@ import { SmartTileScheduler } from './smart-tile-scheduler.js';
 import { AdaptiveBackpressure } from './adaptive-backpressure.js';
 import { SmartCacheEngine } from './smart-cache-engine.js';
 import { PredictiveNavigation } from './predictive-navigation.js';
+import { InstantOpenEngine } from './instant-open.js';
+import { BenchmarkDiagnosticsEngine } from './benchmark-diagnostics.js';
+import { MobileGestureGuard, shouldAutoHideMobileChrome } from './mobile-viewer-2.js';
 
 const $ = (id) => document.getElementById(id);
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -25,6 +28,15 @@ const ui = {
   presentationBtn: $('presentationBtn'),
   presentationExitBtn: $('presentationExitBtn'),
   panelBtn: $('panelBtn'),
+  mobileDock: $('mobileDock'),
+  mobilePanelBtn: $('mobilePanelBtn'),
+  mobileHomeBtn: $('mobileHomeBtn'),
+  mobileMeasureBtn: $('mobileMeasureBtn'),
+  mobileAnnotateBtn: $('mobileAnnotateBtn'),
+  mobileFullscreenBtn: $('mobileFullscreenBtn'),
+  mobileLongPressMenu: $('mobileLongPressMenu'),
+  mobileLongPressMarkerBtn: $('mobileLongPressMarkerBtn'),
+  mobileLongPressMeasureBtn: $('mobileLongPressMeasureBtn'),
   moreBtn: $('moreBtn'),
   moreMenu: $('moreMenu'),
   undoBtn: $('undoBtn'),
@@ -37,6 +49,7 @@ const ui = {
   viewerShell: $('viewerShell'),
   progressivePreview: $('progressivePreview'),
   progressiveBadge: $('progressiveBadge'),
+  instantOpenBadge: $('instantOpenBadge'),
   measurementOverlay: $('measurementOverlay'),
   measurementList: $('measurementList'),
   clearMeasurementsBtn: $('clearMeasurementsBtn'),
@@ -104,6 +117,19 @@ const ui = {
   diagWorkers: $('diagWorkers'),
   rerunBenchmarkBtn: $('rerunBenchmarkBtn'),
   diagMemoryMode: $('diagMemoryMode'),
+  diagSessionScore: $('diagSessionScore'),
+  diagFirstPixel: $('diagFirstPixel'),
+  diagInteractive: $('diagInteractive'),
+  diagFps: $('diagFps'),
+  diagFrameP95: $('diagFrameP95'),
+  diagTileLatency: $('diagTileLatency'),
+  diagDecodeLatency: $('diagDecodeLatency'),
+  diagCacheRate: $('diagCacheRate'),
+  diagPressurePeak: $('diagPressurePeak'),
+  diagRuntimeErrors: $('diagRuntimeErrors'),
+  copyBenchmarkBtn: $('copyBenchmarkBtn'),
+  exportBenchmarkBtn: $('exportBenchmarkBtn'),
+  resetBenchmarkBtn: $('resetBenchmarkBtn'),
   memorySafeToggle: $('memorySafeToggle'),
   startupDiagDialog: $('startupDiagDialog'),
   startupDiagClose: $('startupDiagClose'),
@@ -242,6 +268,8 @@ const HEAVY_PREVIEW_TIMEOUT_MS = 0; // preview manual desativado em heavy mobile
 const SMART_TILE_IDLE_MS = 400;
 const BACKPRESSURE_HEARTBEAT_MS = 750;
 const PREDICTIVE_QUIET_MS = 150;
+const INSTANT_OPEN_FALLBACK_PREVIEW_MS = 900;
+const INSTANT_OPEN_IDLE_TIMEOUT_MS = 1200;
 const PREFS_KEY = 'virtum-svs-viewer-prefs-v035';
 const AUTOSAVE_INDEX_KEY = 'virtum-svs-viewer-autosave-index-v036';
 const AUTOSAVE_PREFIX = 'virtum-svs-viewer-autosave-v036:';
@@ -375,6 +403,16 @@ const state = {
   openStartedAt: 0,
   headerOpenMs: null,
   firstViewMs: null,
+  firstTileLoadedMs: null,
+  firstPixelMs: null,
+  firstPixelSource: '',
+  firstPixelReached: false,
+  firstTileDrawn: false,
+  deferredOpenMs: null,
+  instantDeferredContext: null,
+  instantDeferredTimer: null,
+  instantPreviewTimer: null,
+  instantOpenBadgeTimer: null,
   pendingSlideBytes: 0,
   progressiveMode: 'standard',
   progressivePreviewReady: false,
@@ -404,6 +442,13 @@ const state = {
   activePanel: 'panel-slide',
   sidebarCollapsed: false,
   presentationMode: false,
+  mobileViewer2: false,
+  mobileChromeHidden: false,
+  mobileChromeTimer: null,
+  mobileFocusMode: false,
+  mobileLongPressTimer: null,
+  mobileLongPressPoint: null,
+  mobileLongPressPointerId: null,
   autosaveTimer: null,
   autosaveAvailable: true,
   autosaveFingerprint: null,
@@ -500,6 +545,7 @@ const compareViewer = OpenSeadragon({
 
 let adaptiveBackpressure = null;
 let predictiveNavigation = null;
+const mobileGestureGuard = new MobileGestureGuard({ moveTolerancePx: 14, multiTouchCooldownMs: 480 });
 
 const smartCacheEngine = new SmartCacheEngine(viewer, {
   trimDelayMs: 260,
@@ -543,6 +589,22 @@ predictiveNavigation = new PredictiveNavigation(viewer, {
   getPolicy: () => predictiveNavigationPolicy(),
   onStateChange: () => scheduleDiagnosticsUpdate(),
 });
+
+const instantOpenEngine = new InstantOpenEngine({
+  onChange: () => scheduleDiagnosticsUpdate(),
+});
+
+const benchmarkDiagnostics = new BenchmarkDiagnosticsEngine({
+  sampleLimit: 260,
+  frameLimit: 420,
+  onChange: () => scheduleDiagnosticsUpdate(180),
+});
+
+function benchmarkFrameLoop(timestamp) {
+  if (document.visibilityState === 'visible' && hasOpenSlide() && (state.tileSchedulerMoving || state.awaitingFirstTile || state.opening)) benchmarkDiagnostics.recordFrame(timestamp);
+  window.requestAnimationFrame(benchmarkFrameLoop);
+}
+window.requestAnimationFrame(benchmarkFrameLoop);
 
 let backpressureExpectedAt = performance.now() + BACKPRESSURE_HEARTBEAT_MS;
 window.setInterval(() => {
@@ -892,6 +954,9 @@ function showLibrary() {
   closeMoreMenu();
   ui.libraryScreen.hidden = false;
   ui.app.classList.add('library-open');
+  showMobileChrome();
+  closeMobileLongPressMenu();
+  syncMobileViewerMode();
   renderLibrary();
   setStatus('Biblioteca local');
   window.setTimeout(() => ui.librarySearch?.focus(), 0);
@@ -901,6 +966,7 @@ function hideLibrary() {
   if (!ui.libraryScreen) return;
   ui.libraryScreen.hidden = true;
   ui.app.classList.remove('library-open');
+  syncMobileViewerMode();
 }
 
 function sameLocalFile(entry, file) {
@@ -1264,6 +1330,52 @@ function setBusy(show, title = 'Carregando...', text = '') {
   ui.busyText.textContent = text;
 }
 
+function setInstantOpenBadge(show, text = '') {
+  if (!ui.instantOpenBadge) return;
+  if (state.instantOpenBadgeTimer) {
+    window.clearTimeout(state.instantOpenBadgeTimer);
+    state.instantOpenBadgeTimer = null;
+  }
+  ui.instantOpenBadge.hidden = !show;
+  if (show && text) ui.instantOpenBadge.textContent = text;
+}
+
+function flashInstantOpenBadge(text, ms = 1400) {
+  setInstantOpenBadge(true, text);
+  state.instantOpenBadgeTimer = window.setTimeout(() => {
+    state.instantOpenBadgeTimer = null;
+    if (!state.awaitingFirstTile && state.firstPixelReached) setInstantOpenBadge(false);
+  }, ms);
+}
+
+function clearInstantOpenTimers() {
+  if (state.instantDeferredTimer) {
+    cancelScheduledIdleTask(state.instantDeferredTimer);
+    state.instantDeferredTimer = null;
+  }
+  if (state.instantPreviewTimer) {
+    window.clearTimeout(state.instantPreviewTimer);
+    state.instantPreviewTimer = null;
+  }
+  if (state.instantOpenBadgeTimer) {
+    window.clearTimeout(state.instantOpenBadgeTimer);
+    state.instantOpenBadgeTimer = null;
+  }
+}
+
+function scheduleIdleTask(callback, timeout = INSTANT_OPEN_IDLE_TIMEOUT_MS) {
+  if (typeof window.requestIdleCallback === 'function') {
+    return { id: window.requestIdleCallback(callback, { timeout }), idle: true };
+  }
+  return { id: window.setTimeout(callback, 32), idle: false };
+}
+
+function cancelScheduledIdleTask(handle) {
+  if (!handle) return;
+  if (handle.idle && typeof window.cancelIdleCallback === 'function') window.cancelIdleCallback(handle.id);
+  else window.clearTimeout(handle.id);
+}
+
 function restoreEmptyStateText() {
   ui.emptyLead.textContent = DEFAULT_EMPTY_LEAD;
   ui.emptyHint.textContent = DEFAULT_EMPTY_HINT;
@@ -1309,6 +1421,7 @@ function setViewerControlsEnabled(enabled) {
   ui.pixelPerfectToggle.disabled = !enabled;
   ui.perfProfileSelect.disabled = false;
   ui.resetVisualBtn.disabled = !enabled;
+  syncMobileDockState();
 }
 
 function hasOpenSlide() {
@@ -1557,7 +1670,17 @@ function armFirstTileTimeout() {
 
 async function closeCurrentSlide() {
   clearFirstTileTimer();
+  clearInstantOpenTimers();
+  setInstantOpenBadge(false);
   resetProgressivePreview();
+  instantOpenEngine.reset();
+  state.firstTileLoadedMs = null;
+  state.firstPixelMs = null;
+  state.firstPixelSource = '';
+  state.firstPixelReached = false;
+  state.firstTileDrawn = false;
+  state.deferredOpenMs = null;
+  state.instantDeferredContext = null;
   if (state.compareActive || state.compareSlide) await closeCompareMode(false);
   if (state.lessonPresenting) {
     state.lessonPresenting = false;
@@ -1623,6 +1746,9 @@ async function closeCurrentSlide() {
   setViewerControlsEnabled(false);
   updateZoomText();
   ui.scaleBar.hidden = true;
+  showMobileChrome();
+  closeMobileLongPressMenu();
+  syncMobileDockState();
 }
 
 function getCompatibilityProblem() {
@@ -1665,6 +1791,162 @@ function detectMobileDevice() {
   const narrowSide = Math.min(Number(screen.width || window.innerWidth || 0), Number(screen.height || window.innerHeight || 0));
   const touchTablet = coarsePointer && (navigator.maxTouchPoints || 0) > 1 && narrowSide > 0 && narrowSide <= 1100;
   return uaMobile || ipadDesktopMode || touchTablet;
+}
+
+function anyModalDialogOpen() {
+  return Boolean(
+    ui.annotationDialog?.open || ui.sessionDialog?.open || ui.reportDialog?.open ||
+    ui.startupDiagDialog?.open
+  );
+}
+
+function updateMobileViewportHeight() {
+  const height = Math.round(window.visualViewport?.height || window.innerHeight || 0);
+  if (height > 0) ui.app?.style.setProperty('--mobile-viewport-height', `${height}px`);
+}
+
+function syncMobileDockState() {
+  if (!ui.mobileDock) return;
+  const enabled = hasOpenSlide();
+  ui.mobileHomeBtn.disabled = !enabled;
+  ui.mobileMeasureBtn.disabled = !enabled;
+  ui.mobileAnnotateBtn.disabled = !enabled;
+  ui.mobileMeasureBtn.setAttribute('aria-pressed', String(Boolean(state.measureMode)));
+  ui.mobileAnnotateBtn.setAttribute('aria-pressed', String(state.annotationMode === 'marker'));
+  if (ui.mobileFullscreenBtn) {
+    const fullscreen = Boolean(document.fullscreenElement || state.mobileFocusMode);
+    ui.mobileFullscreenBtn.setAttribute('aria-pressed', String(fullscreen));
+    const label = fullscreen ? 'Sair da tela cheia' : 'Tela cheia';
+    ui.mobileFullscreenBtn.setAttribute('aria-label', label);
+    const text = ui.mobileFullscreenBtn.querySelector('span:last-child');
+    if (text) text.textContent = fullscreen ? 'Sair' : 'Tela';
+  }
+}
+
+function syncMobileViewerMode() {
+  const enabled = detectMobileDevice();
+  state.mobileViewer2 = enabled;
+  ui.app.classList.toggle('mobile-viewer-2', enabled);
+  if (ui.mobileDock) ui.mobileDock.hidden = !enabled;
+  if (!enabled) {
+    state.mobileChromeHidden = false;
+    state.mobileFocusMode = false;
+    ui.app.classList.remove('mobile-chrome-hidden', 'mobile-focus-mode');
+    closeMobileLongPressMenu();
+  }
+  updateMobileViewportHeight();
+  syncMobileDockState();
+}
+
+function clearMobileChromeTimer() {
+  if (!state.mobileChromeTimer) return;
+  window.clearTimeout(state.mobileChromeTimer);
+  state.mobileChromeTimer = null;
+}
+
+function showMobileChrome({ holdMs = 0 } = {}) {
+  if (!state.mobileViewer2) return;
+  clearMobileChromeTimer();
+  state.mobileChromeHidden = false;
+  ui.app.classList.remove('mobile-chrome-hidden');
+  if (holdMs > 0) {
+    state.mobileChromeTimer = window.setTimeout(() => {
+      state.mobileChromeTimer = null;
+    }, holdMs);
+  }
+}
+
+function mobileChromeCanAutoHide() {
+  return shouldAutoHideMobileChrome({
+    enabled: state.mobileViewer2,
+    hasSlide: hasOpenSlide(),
+    toolActive: Boolean(state.measureMode || state.annotationMode),
+    sidebarOpen: ui.sidebar?.classList.contains('open'),
+    menuOpen: Boolean(ui.moreMenu && !ui.moreMenu.hidden),
+    dialogOpen: anyModalDialogOpen() || Boolean(ui.mobileLongPressMenu && !ui.mobileLongPressMenu.hidden),
+    presentationMode: state.presentationMode,
+    lessonPresenting: state.lessonPresenting,
+  });
+}
+
+function hideMobileChromeForMotion() {
+  if (!mobileChromeCanAutoHide()) {
+    showMobileChrome();
+    return;
+  }
+  clearMobileChromeTimer();
+  state.mobileChromeHidden = true;
+  ui.app.classList.add('mobile-chrome-hidden');
+  state.mobileChromeTimer = window.setTimeout(() => {
+    state.mobileChromeTimer = null;
+    showMobileChrome();
+  }, 900);
+}
+
+function closeMobileLongPressMenu() {
+  if (!ui.mobileLongPressMenu) return;
+  ui.mobileLongPressMenu.hidden = true;
+  state.mobileLongPressPoint = null;
+}
+
+function cancelMobileLongPressTimer() {
+  if (state.mobileLongPressTimer) window.clearTimeout(state.mobileLongPressTimer);
+  state.mobileLongPressTimer = null;
+  state.mobileLongPressPointerId = null;
+}
+
+function showMobileLongPressMenu(clientX, clientY, imagePoint) {
+  if (!ui.mobileLongPressMenu || !state.mobileViewer2) return;
+  const shellRect = ui.viewerShell.getBoundingClientRect();
+  const localX = Math.max(112, Math.min(shellRect.width - 112, clientX - shellRect.left));
+  const localY = Math.max(72, Math.min(shellRect.height - 72, clientY - shellRect.top));
+  state.mobileLongPressPoint = { x: imagePoint.x, y: imagePoint.y };
+  ui.mobileLongPressMenu.style.left = `${localX}px`;
+  ui.mobileLongPressMenu.style.top = `${localY}px`;
+  ui.mobileLongPressMenu.hidden = false;
+  showMobileChrome({ holdMs: 1000 });
+  navigator.vibrate?.(12);
+}
+
+function setMobileFocusMode(enabled) {
+  state.mobileFocusMode = Boolean(enabled);
+  ui.app.classList.toggle('mobile-focus-mode', state.mobileFocusMode);
+  if (state.mobileFocusMode) {
+    closeSidebar();
+    closeMoreMenu();
+  }
+  syncMobileDockState();
+  refreshAfterLayoutChange();
+}
+
+async function toggleViewerFullscreen() {
+  try {
+    closeSidebar();
+    closeMoreMenu();
+    closeMobileLongPressMenu();
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+      return;
+    }
+    if (ui.viewerShell?.requestFullscreen) {
+      await ui.viewerShell.requestFullscreen({ navigationUI: 'hide' });
+      return;
+    }
+    if (state.mobileViewer2) {
+      setMobileFocusMode(!state.mobileFocusMode);
+      showToast(state.mobileFocusMode ? 'Modo imersivo ativado' : 'Modo imersivo encerrado', 'info');
+      return;
+    }
+    setStatus('Este navegador não oferece tela cheia para o visualizador.');
+  } catch (error) {
+    if (state.mobileViewer2) {
+      setMobileFocusMode(!state.mobileFocusMode);
+      showToast('Tela cheia nativa indisponível · usando modo imersivo', 'info');
+      return;
+    }
+    console.warn('Não foi possível alternar tela cheia:', error);
+    setStatus('O navegador bloqueou a troca para tela cheia.');
+  }
 }
 
 function isLikelyConstrainedDevice() {
@@ -2042,12 +2324,120 @@ function showProgressivePreview(imageData, level) {
   state.progressivePreviewReady = true;
   state.progressivePreviewLevel = level;
   state.progressivePreviewMs = state.openStartedAt ? performance.now() - state.openStartedAt : null;
-  if (ui.progressiveBadge) {
-    const secs = state.progressivePreviewMs != null ? ` · ${(state.progressivePreviewMs / 1000).toFixed(1)} s` : '';
-    ui.progressiveBadge.textContent = `Preview pronto${secs} · refinando…`;
-    ui.progressiveBadge.hidden = false;
-  }
+  if (ui.progressiveBadge) ui.progressiveBadge.hidden = true;
   return true;
+}
+
+
+async function runDeferredOpenTasks() {
+  const context = state.instantDeferredContext;
+  if (!context || context.running || context.done) return;
+  const { file, slide } = context;
+  if (state.currentFile !== file || !state.slides.includes(slide)) return;
+  context.running = true;
+  instantOpenEngine.markDeferredStart();
+  setStartupPhase('Primeira imagem visível · finalizando dados secundários');
+
+  try {
+    updateMetadata(file, slide);
+    upsertLibraryEntry(file, slide);
+
+    const requestedSession = state.pendingLibraryOpen?.session || null;
+    const autosaveRecord = readLocalAutosave(file);
+    state.pendingAutosaveData = requestedSession?.payload || autosaveRecord?.payload || null;
+    state.autosaveSavedAt = requestedSession?.updatedAt || autosaveRecord?.savedAt || null;
+    state.autosaveFingerprint = autosaveRecord?.fingerprint || slideFingerprint(file);
+    state.activeSessionName = requestedSession?.name || null;
+    state.pendingLibraryOpen = null;
+    setAutosaveStatus(
+      state.pendingAutosaveData
+        ? (requestedSession ? 'Sessão local · restaurando…' : 'Autosave local · restaurando…')
+        : 'Autosave local · ativo',
+      state.pendingAutosaveData ? 'pending' : 'idle',
+    );
+
+    if (state.pendingAutosaveData) {
+      try {
+        applyProjectData(state.pendingAutosaveData, { safe: true, resetHistoryAfter: true });
+        const time = state.autosaveSavedAt
+          ? new Date(state.autosaveSavedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+          : null;
+        if (state.activeSessionName) {
+          setAutosaveStatus(`Sessão · ${state.activeSessionName}`, 'saved');
+          showToast(`Sessão restaurada: ${state.activeSessionName}`, 'success');
+        } else {
+          setAutosaveStatus(time ? `Autosave local · ${time}` : 'Autosave local · restaurado', 'saved');
+          showToast('Sessão local restaurada', 'success');
+        }
+      } catch (error) {
+        console.warn('Não foi possível restaurar o autosave:', error);
+        resetHistory();
+        setAutosaveStatus('Autosave local · ativo', 'idle');
+      } finally {
+        state.pendingAutosaveData = null;
+      }
+    } else {
+      resetHistory();
+    }
+
+    applyQualityModeSettings();
+    setViewerControlsEnabled(true);
+    redrawOverlays();
+    context.done = true;
+    instantOpenEngine.markInteractive();
+    state.deferredOpenMs = instantOpenEngine.snapshot.interactiveMs;
+    const fp = state.firstPixelMs != null ? `${(state.firstPixelMs / 1000).toFixed(1)} s` : '—';
+    const ready = state.deferredOpenMs != null ? `${(state.deferredOpenMs / 1000).toFixed(1)} s` : '—';
+    setStartupPhase(`Instant Open pronto · primeiro pixel ${fp} · interativo ${ready}`);
+    scheduleDiagnosticsUpdate();
+  } catch (error) {
+    console.warn('Tarefas secundárias da abertura foram adiadas:', error);
+    if (hasOpenSlide()) setViewerControlsEnabled(true);
+  } finally {
+    context.running = false;
+  }
+}
+
+function scheduleDeferredOpenTasks() {
+  if (!state.firstPixelReached || !state.instantDeferredContext || state.instantDeferredContext.done) return;
+  if (state.instantDeferredTimer) return;
+  state.instantDeferredTimer = scheduleIdleTask(() => {
+    state.instantDeferredTimer = null;
+    runDeferredOpenTasks();
+  });
+}
+
+function markInstantFirstPixel(source = 'tile') {
+  if (state.firstPixelReached) return false;
+  state.firstPixelReached = true;
+  instantOpenEngine.markFirstPixel(source);
+  state.firstPixelMs = instantOpenEngine.snapshot.firstPixelMs;
+  state.firstViewMs = state.firstPixelMs;
+  state.firstPixelSource = source;
+  setBusy(false);
+  const seconds = state.firstPixelMs != null ? `${(state.firstPixelMs / 1000).toFixed(1)} s` : 'agora';
+  flashInstantOpenBadge(`Primeira imagem em ${seconds} · refinando detalhes…`, 1800);
+  scheduleDeferredOpenTasks();
+  scheduleDiagnosticsUpdate();
+  return true;
+}
+
+function scheduleFallbackPreview(generator, file) {
+  if (state.instantPreviewTimer) window.clearTimeout(state.instantPreviewTimer);
+  const mode = slideStartupMode(file?.size || 0);
+  const eligible = mode === 'progressive'
+    && !detectMobileDevice()
+    && !detectLowPowerDesktop()
+    && !state.memorySafeMode
+    && (state.engineWorkerCount || 1) > 1;
+  if (!eligible || previewBudgetForSlide(mode) <= 0) return;
+
+  state.instantPreviewTimer = window.setTimeout(async () => {
+    state.instantPreviewTimer = null;
+    if (state.firstPixelReached || state.currentFile !== file || state.firstTileRequestedAt) return;
+    try { await buildProgressivePreview(generator, file); }
+    catch (_) {}
+  }, INSTANT_OPEN_FALLBACK_PREVIEW_MS);
 }
 
 async function buildProgressivePreview(generator, file) {
@@ -2068,7 +2458,7 @@ async function buildProgressivePreview(generator, file) {
     window.clearTimeout(timeoutId);
     const shown = showProgressivePreview(imageData, level);
     if (shown) {
-      setBusy(false);
+      markInstantFirstPixel('preview');
       setStatus(`${file.name} · preview disponível · refinando detalhes…`);
       setStartupPhase(`Preview pronto · nível ${level} · refinando em segundo plano`);
     }
@@ -2228,10 +2618,11 @@ function startupDiagnosticText() {
   const engine = engineSettingsForCurrentMode();
   const benchmark = state.deviceBenchmark;
   return [
-    'Virtum SVS Viewer v0.5.6 · Predictive Navigation',
+    'Virtum SVS Viewer v0.5.9 · Benchmark & Diagnostics',
     `Data: ${new Date().toLocaleString('pt-BR')}`,
     `UA: ${navigator.userAgent || '—'}`,
     `Móvel/tablet: ${detectMobileDevice()}`,
+    `Mobile Viewer 2.0: ${state.mobileViewer2 ? `ativo · chrome ${state.mobileChromeHidden ? 'oculto' : 'visível'}${state.mobileFocusMode ? ' · imersivo' : ''}` : 'inativo'}`,
     `HTTPS/contexto seguro: ${window.isSecureContext}`,
     `crossOriginIsolated: ${window.crossOriginIsolated}`,
     `SharedArrayBuffer: ${typeof SharedArrayBuffer !== 'undefined'}`,
@@ -2247,10 +2638,12 @@ function startupDiagnosticText() {
     `Broker cache: ${Math.round(engine.brokerCacheBytes / (1024 * 1024))} MiB`,
     `Fase: ${state.startupPhase}`,
     `Smart Tile Scheduler: ${state.tileSchedulerMoving ? 'movimento' : 'ocioso/refino'} · fila ${state.tileSchedulerJobLimit || viewer.imageLoader?.jobLimit || '?'} · max/frame ${state.tileSchedulerMaxTilesPerFrame || 1}`,
-    `Predictive Navigation: ${predictiveNavigation?.snapshot.state || 'standby'} · ${predictiveNavigation?.snapshot.completed || 0}/${predictiveNavigation?.snapshot.requested || 0} tiles · ${predictiveNavigation?.snapshot.speedViewportPerSec || 0} vp/s · ${predictiveNavigation?.snapshot.lastReason || '—'}`, 
+    `Predictive Navigation: ${predictiveNavigation?.snapshot.state || 'standby'} · ${predictiveNavigation?.snapshot.completed || 0}/${predictiveNavigation?.snapshot.requested || 0} tiles · ${predictiveNavigation?.snapshot.speedViewportPerSec || 0} vp/s · ${predictiveNavigation?.snapshot.lastReason || '—'}`,
+    `Instant Open: ${instantOpenEngine.snapshot.stage} · header ${instantOpenEngine.snapshot.headerMs == null ? '—' : Math.round(instantOpenEngine.snapshot.headerMs) + ' ms'} · viewer ${instantOpenEngine.snapshot.viewerOpenMs == null ? '—' : Math.round(instantOpenEngine.snapshot.viewerOpenMs) + ' ms'} · primeiro pixel ${instantOpenEngine.snapshot.firstPixelMs == null ? '—' : Math.round(instantOpenEngine.snapshot.firstPixelMs) + ' ms'} · interativo ${instantOpenEngine.snapshot.interactiveMs == null ? '—' : Math.round(instantOpenEngine.snapshot.interactiveMs) + ' ms'} · fonte ${instantOpenEngine.snapshot.firstPixelSource || '—'}`,
     `Scheduler descartes: ${state.tileSchedulerDiscardedJobs} jobs em ${state.tileSchedulerQueueClears} limpezas de fila`,
     `Adaptive Backpressure: ${adaptiveBackpressure?.snapshot.label || 'Normal'} · score ${adaptiveBackpressure?.snapshot.score || 0} · tile ${adaptiveBackpressure?.snapshot.totalMs || 0} ms · decode ${adaptiveBackpressure?.snapshot.decodeMs || 0} ms · lag ${adaptiveBackpressure?.snapshot.eventLoopLagMs || 0} ms · ${adaptiveBackpressure?.snapshot.reason || 'estável'}`,
-    `Primeiro tile: ${state.firstTileTotalMs == null ? '—' : `${Math.round(state.firstTileTotalMs)} ms`} · decode ${state.firstTileDecodeMs == null ? '—' : `${Math.round(state.firstTileDecodeMs)} ms`} · bitmap ${state.firstTileBitmapMs == null ? '—' : `${Math.round(state.firstTileBitmapMs)} ms`}`,
+    `Primeiro tile: ${state.firstTileTotalMs == null ? '—' : `${Math.round(state.firstTileTotalMs)} ms`} · decode ${state.firstTileDecodeMs == null ? '—' : `${Math.round(state.firstTileDecodeMs)} ms`} · bitmap ${state.firstTileBitmapMs == null ? '—' : `${Math.round(state.firstTileBitmapMs)} ms`} · pixel ${state.firstPixelMs == null ? '—' : `${Math.round(state.firstPixelMs)} ms`}`,
+    `Benchmark sessão: ${benchmarkDiagnostics.snapshot.tileCount} tiles · FPS ${benchmarkDiagnostics.snapshot.fpsAverage || '—'} · tile p95 ${benchmarkDiagnostics.snapshot.tileTotalP95Ms || '—'} ms · decode p95 ${benchmarkDiagnostics.snapshot.decodeP95Ms || '—'} ms · pressão pico ${benchmarkDiagnostics.snapshot.peakBackpressureLabel}`,
     `Probe WASM: ${wasmProbeText()}`,
     `Último erro: ${state.lastEngineError || '—'}`,
   ].join('\n');
@@ -2635,9 +3028,6 @@ async function openSvs(file) {
 
   hideLibrary();
   state.opening = true;
-  state.openStartedAt = performance.now();
-  state.headerOpenMs = null;
-  state.firstViewMs = null;
   state.pendingSlideBytes = file.size || 0;
   state.progressiveMode = slideStartupMode(file.size || 0);
   state.heavyStartupActive = false;
@@ -2646,55 +3036,53 @@ async function openSvs(file) {
   resetProgressivePreview();
   state.currentFile = file;
   state.lastEngineError = '';
-  setStartupPhase('Arquivo .SVS recebido');
+  setStartupPhase('Arquivo .SVS recebido · Instant Open');
   restoreEmptyStateText();
 
   try {
     if (!state.ready || !state.openslide) {
-      setBusy(true, 'Preparando o microscópio', 'O motor será iniciado somente agora…');
+      setBusy(true, 'Preparando o microscópio', 'Inicializando o motor local uma única vez…');
       setStartupPhase('Preparando motor OpenSlide');
       await ensureOpenSlide();
     }
 
-    setBusy(true, `Abrindo lâmina · ${startupModeLabel(state.progressiveMode)}`, `${file.name} · ${formatBytes(file.size)}`);
-    setStatus('Lendo cabeçalho da lâmina…');
-    setStartupPhase('Abrindo cabeçalho da lâmina');
+    setBusy(true, `Instant Open · ${startupModeLabel(state.progressiveMode)}`, `${file.name} · ${formatBytes(file.size)} · lendo cabeçalho…`);
+    setStatus('Instant Open · lendo cabeçalho da lâmina…');
+    setStartupPhase('Instant Open · abrindo cabeçalho');
 
     await closeCurrentSlide();
-    // closeCurrentSlide limpa o estado da lâmina anterior; restaura o perfil
-    // calculado para o arquivo que está entrando antes de iniciar a leitura.
+    // O relógio da abertura começa depois de liberar a lâmina anterior. Assim as
+    // métricas representam somente o caminho crítico do novo arquivo.
     state.currentFile = file;
     state.pendingSlideBytes = file.size || 0;
     state.progressiveMode = slideStartupMode(file.size || 0);
+    state.openStartedAt = performance.now();
+    state.headerOpenMs = null;
+    state.firstViewMs = null;
+    state.firstTileLoadedMs = null;
+    state.firstPixelMs = null;
+    state.firstPixelSource = '';
+    state.firstPixelReached = false;
+    state.firstTileDrawn = false;
+    state.deferredOpenMs = null;
+    instantOpenEngine.begin({ mode: state.progressiveMode, fileSize: file.size || 0 });
+    benchmarkDiagnostics.resetSession({ fileName: file.name, fileSize: file.size || 0, mode: state.progressiveMode });
 
     const slide = await state.openslide.open(file);
-    state.headerOpenMs = performance.now() - state.openStartedAt;
+    instantOpenEngine.markHeader();
+    state.headerOpenMs = instantOpenEngine.snapshot.headerMs;
     state.slides.push(slide);
-    setStartupPhase('Criando pirâmide Deep Zoom');
+
+    setStartupPhase('Instant Open · montando pirâmide mínima');
     const mobileTileSize = (detectMobileDevice() || state.memorySafeMode) ? MOBILE_DZI_TILE_SIZE : DESKTOP_DZI_TILE_SIZE;
     state.generators = [new DeepZoomGenerator(slide, { tileSize: mobileTileSize, overlap: 1 })];
+    instantOpenEngine.markPyramid();
     smartCacheEngine.reset({ maxLevel: state.generators[0].levelCount - 1, tileSize: mobileTileSize });
-    // Aplica o orçamento de cache antes de o OSD começar a requisitar tiles.
-    // Em Heavy/Ultra Heavy, o throttle de startup abaixo aperta ainda mais.
+
+    // Orçamento e proteção entram antes da primeira solicitação, mas nenhum
+    // trabalho secundário (biblioteca, metadados ou autosave) bloqueia esta pista.
     applyPerformanceProfile(true);
     activateHeavyStartupThrottle(state.progressiveMode);
-
-    // A prévia manual continua útil entre 100–249 MB. Em >=250 MB no mobile/
-    // low-power ela é deliberadamente pulada: o próprio Deep Zoom vira a primeira
-    // visualização, evitando duas decodificações competindo pelo único worker.
-    await buildProgressivePreview(state.generators[0], file);
-
-    updateMetadata(file, slide);
-    upsertLibraryEntry(file, slide);
-    const requestedSession = state.pendingLibraryOpen?.session || null;
-    const autosaveRecord = readLocalAutosave(file);
-    state.pendingAutosaveData = requestedSession?.payload || autosaveRecord?.payload || null;
-    state.autosaveSavedAt = requestedSession?.updatedAt || autosaveRecord?.savedAt || null;
-    state.autosaveFingerprint = autosaveRecord?.fingerprint || slideFingerprint(file);
-    state.activeSessionName = requestedSession?.name || null;
-    state.pendingLibraryOpen = null;
-    setAutosaveStatus(state.pendingAutosaveData ? (requestedSession ? 'Sessão local · restaurando…' : 'Autosave local · restaurando…') : 'Autosave local · ativo', state.pendingAutosaveData ? 'pending' : 'idle');
-    hideLibrary();
 
     state.tileRequested = 0;
     state.firstTileRequestedAt = 0;
@@ -2706,13 +3094,14 @@ async function openSvs(file) {
     state.tileFailedCount = 0;
     state.tileAbortedCount = 0;
     state.tileLevelCounts = {};
+
     const tileSource = createOpenSlideTileSource(state.generators, file.name, {
       onTileStart: ({ level, x, y, startedAt }) => {
         smartCacheEngine.recordMiss({ level, x, y });
         state.tileRequested += 1;
         if (!state.firstTileRequestedAt) {
           state.firstTileRequestedAt = startedAt || performance.now();
-          setStartupPhase('Primeiro tile · lendo e decodificando…');
+          setStartupPhase('Instant Open · primeiro tile lendo/decodificando…');
         }
         state.tileLevelCounts[level] = state.tileLevelCounts[level] || 0;
         scheduleDiagnosticsUpdate();
@@ -2721,12 +3110,13 @@ async function openSvs(file) {
         if (state.firstTileDecodeMs == null) {
           state.firstTileDecodeMs = decodeMs;
           state.firstTileDecodedAt = decodedAt || performance.now();
-          setStartupPhase(`Primeiro tile decodificado · ${Math.round(decodeMs)} ms · preparando bitmap`);
+          setStartupPhase(`Instant Open · tile decodificado ${Math.round(decodeMs)} ms · desenhando…`);
         }
       },
       onTileLoaded: ({ level, x, y, decodeMs, bitmapMs, totalMs }) => {
         smartCacheEngine.recordLoaded({ level, x, y });
         state.tileLoadedCount += 1;
+        benchmarkDiagnostics.recordTile({ decodeMs, bitmapMs, totalMs });
         adaptiveBackpressure?.recordTileLoaded({ decodeMs, totalMs });
         if (state.firstTileTotalMs == null) {
           state.firstTileDecodeMs = decodeMs;
@@ -2736,19 +3126,37 @@ async function openSvs(file) {
         state.tileLevelCounts[level] = (state.tileLevelCounts[level] || 0) + 1;
         scheduleDiagnosticsUpdate();
       },
-      onTileError: ({ error }) => { state.tileFailedCount += 1; adaptiveBackpressure?.recordTileError(); state.lastEngineError = error?.message || String(error || 'Falha de tile'); scheduleDiagnosticsUpdate(); },
-      onTileAbort: () => { state.tileAbortedCount += 1; scheduleDiagnosticsUpdate(); },
+      onTileError: ({ error }) => {
+        state.tileFailedCount += 1;
+        benchmarkDiagnostics.recordTileError();
+        adaptiveBackpressure?.recordTileError();
+        state.lastEngineError = error?.message || String(error || 'Falha de tile');
+        scheduleDiagnosticsUpdate();
+      },
+      onTileAbort: () => {
+        state.tileAbortedCount += 1;
+        benchmarkDiagnostics.recordTileAbort();
+        scheduleDiagnosticsUpdate();
+      },
     });
+
     state.tileLoaded = false;
     state.tileErrors = 0;
     state.rotation = 0;
     state.awaitingFirstTile = true;
-    setStartupPhase(`Aguardando primeira imagem · ${startupModeLabel(state.progressiveMode)} · ${detectMobileDevice() ? 'mobile' : detectLowPowerDesktop() ? 'low power' : 'desktop'} · fila ${state.heavyStartupJobLimit || viewer.imageLoader?.jobLimit || '?'} · scheduler centro-primeiro`);
+    state.instantDeferredContext = { file, slide, running: false, done: false };
+
+    // First Pixel Lane: a partir daqui o OSD tem prioridade absoluta. Tudo que
+    // não é necessário para desenhar a lâmina fica para depois do primeiro pixel.
+    setStartupPhase(`First Pixel Lane · ${startupModeLabel(state.progressiveMode)} · fila ${state.heavyStartupJobLimit || viewer.imageLoader?.jobLimit || '?'} · centro-primeiro`);
     viewer.open(tileSource);
+    instantOpenEngine.markViewerOpen();
     ui.emptyState.hidden = true;
-    setViewerControlsEnabled(true);
-    setStatus(state.progressivePreviewReady ? `${file.name} · preview pronto · refinando detalhes…` : `${file.name} · preparando visualização…`);
+    setBusy(false);
+    setInstantOpenBadge(true, 'Instant Open · buscando primeira imagem…');
+    setStatus(`${file.name} · primeira imagem em prioridade máxima…`);
     armFirstTileTimeout();
+    scheduleFallbackPreview(state.generators[0], file);
   } catch (error) {
     state.lastEngineError = String(error?.message || error || 'Falha ao abrir SVS');
     setStartupPhase('Falha ao abrir lâmina', state.lastEngineError);
@@ -2978,6 +3386,105 @@ function formatMicronsDetailed(value) {
   return `${value.toFixed(3)} µm/px`;
 }
 
+function formatBenchmarkMs(value) {
+  return value == null || !Number.isFinite(Number(value)) ? '—' : `${Math.round(Number(value))} ms`;
+}
+
+function benchmarkReportPayload() {
+  const benchmark = state.deviceBenchmark;
+  const current = currentSlideInfo?.() || null;
+  return benchmarkDiagnostics.createReport({
+    app: 'Virtum SVS Viewer',
+    slide: {
+      name: state.currentFile?.name || '',
+      sizeBytes: state.currentFile?.size || 0,
+      width: state.slides[0]?.levelDimensions?.[0]?.width || null,
+      height: state.slides[0]?.levelDimensions?.[0]?.height || null,
+      svsLevel: current?.levelIndex ?? null,
+    },
+    device: {
+      userAgent: navigator.userAgent || '',
+      logicalProcessors: benchmark?.logical ?? navigator.hardwareConcurrency ?? null,
+      deviceMemoryGiB: benchmark?.memory ?? navigator.deviceMemory ?? null,
+      tier: benchmark?.tier || null,
+      mobile: benchmark?.mobile ?? detectMobileDevice(),
+      lowPower: benchmark?.lowPower ?? detectLowPowerDesktop(),
+      dpr: window.devicePixelRatio || 1,
+    },
+  });
+}
+
+function benchmarkTextReport() {
+  const report = benchmarkReportPayload();
+  const m = report.metrics;
+  return [
+    'Virtum SVS Viewer v0.5.9 · Benchmark & Diagnostics',
+    `Data: ${new Date(report.generatedAt).toLocaleString('pt-BR')}`,
+    `Lâmina: ${m.fileName || '—'} · ${m.fileSize ? formatBytes(m.fileSize) : '—'} · ${m.mode}`,
+    `Score da sessão: ${report.score.value}/100 · ${report.score.label}`,
+    `First Pixel: ${formatBenchmarkMs(m.firstPixelMs)} · Interactive: ${formatBenchmarkMs(m.interactiveMs)}`,
+    `FPS: atual ${m.fpsCurrent} · médio ${m.fpsAverage} · frame p95 ${m.frameP95Ms} ms · pior ${m.frameWorstMs} ms · long frames ${m.longFrames}`,
+    `Tiles: ${m.tileCount} · médio ${m.tileTotalAvgMs} ms · p95 ${m.tileTotalP95Ms} ms`,
+    `Decode: médio ${m.decodeAvgMs} ms · p95 ${m.decodeP95Ms} ms · bitmap ${m.bitmapAvgMs} ms`,
+    `Cache: hit ${m.cacheHitRate}% (${m.cacheHits}/${m.cacheMisses}) · re-decode ${m.cacheRedecodes} · ~${m.cacheEstimatedMiB} MiB`,
+    `Backpressure pico: ${m.peakBackpressureLabel} · score ${m.peakBackpressureScore} · lag pico ${m.peakEventLoopLagMs} ms`,
+    `Fila pico: ${m.peakQueue} · jobs em voo pico ${m.peakJobs}`,
+    `Erros: ${m.tileErrors} · abortos ${m.tileAborts}`,
+  ].join('\n');
+}
+
+function updateBenchmarkDashboard() {
+  if (!ui.diagSessionScore) return;
+  const report = benchmarkReportPayload();
+  const m = report.metrics;
+  ui.diagSessionScore.textContent = report.score.value == null ? report.score.label : `${report.score.value}/100 · ${report.score.label}`;
+  ui.diagSessionScore.dataset.score = report.score.value == null ? '' : String(report.score.value);
+  ui.diagFirstPixel.textContent = formatBenchmarkMs(m.firstPixelMs);
+  ui.diagInteractive.textContent = formatBenchmarkMs(m.interactiveMs);
+  ui.diagFps.textContent = m.fpsAverage ? `${m.fpsCurrent} atual · ${m.fpsAverage} médio` : 'aguardando navegação';
+  ui.diagFrameP95.textContent = m.frameP95Ms ? `${m.frameP95Ms} ms · pior ${m.frameWorstMs} ms` : '—';
+  ui.diagTileLatency.textContent = m.tileCount ? `${m.tileTotalAvgMs} ms médio · p95 ${m.tileTotalP95Ms} ms` : 'aguardando tiles';
+  ui.diagDecodeLatency.textContent = m.tileCount ? `${m.decodeAvgMs} ms médio · p95 ${m.decodeP95Ms} ms` : '—';
+  ui.diagCacheRate.textContent = `${m.cacheHitRate}% · ${m.cacheHits} hits / ${m.cacheMisses} misses · ${m.cacheRedecodes} re-decodes`;
+  ui.diagPressurePeak.textContent = `${m.peakBackpressureLabel} · score ${m.peakBackpressureScore} · lag ${m.peakEventLoopLagMs} ms`;
+  ui.diagRuntimeErrors.textContent = `${m.tileErrors} falhas · ${m.tileAborts} abortos · ${m.longFrames} frames >50 ms`;
+}
+
+async function copyBenchmarkReport() {
+  const text = benchmarkTextReport();
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('Benchmark copiado', 'success');
+  } catch (_) {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    try { document.execCommand('copy'); showToast('Benchmark copiado', 'success'); }
+    catch (_) { showToast('Não foi possível copiar o benchmark', 'error'); }
+    area.remove();
+  }
+}
+
+function exportBenchmarkReport() {
+  const payload = benchmarkReportPayload();
+  const filename = `${sanitizeBaseName(state.currentFile?.name || 'sessao')}_benchmark_v0.5.9.json`;
+  downloadBlob(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' }), filename);
+  showToast('Benchmark JSON exportado', 'success');
+}
+
+function resetSessionBenchmark() {
+  benchmarkDiagnostics.resetSession({
+    fileName: state.currentFile?.name || '',
+    fileSize: state.currentFile?.size || 0,
+    mode: state.progressiveMode || 'standard',
+  });
+  scheduleDiagnosticsUpdate(0);
+  showToast('Benchmark da sessão zerado', 'info');
+}
+
 function updateDiagnostics() {
   const benchmark = state.deviceBenchmark;
   const logical = benchmark?.logical ?? navigator.hardwareConcurrency ?? '?';
@@ -3028,6 +3535,17 @@ function updateDiagnostics() {
       : 'Normal';
   }
   if (ui.memorySafeToggle) ui.memorySafeToggle.checked = state.memorySafeMode;
+  benchmarkDiagnostics.observeRuntime({
+    pressure,
+    scheduler: smartTileScheduler.snapshot,
+    cache: smartCache,
+    predictive: predictiveNavigation?.snapshot || {},
+    instant: instantOpenEngine.snapshot,
+    profile: { selected: state.performanceProfile, effective: effectiveProfileKey(), label: cfg.label },
+    device: { logical, memory, mobile: detectMobileDevice(), lowPower: detectLowPowerDesktop() },
+    memory: { safeMode: state.memorySafeMode, brokerCacheMiB: cacheMB },
+  });
+  updateBenchmarkDashboard();
   updateStartupDiagnostics();
 
   if (!hasOpenSlide()) {
@@ -3036,7 +3554,7 @@ function updateDiagnostics() {
     ui.diagCurrentMpp.textContent = '—';
     ui.diagApproxMag.textContent = '—';
     ui.diagTiles.textContent = '—';
-    ui.diagCache.textContent = `${cfg.label} · ${startupModeLabel(state.progressiveMode)} · Smart Cache ${smartCache.loadedCount}/${smartCache.targetCount} · hit ${smartCache.hitRate}% · re-decode ${smartCache.redecodes} · fila ${activeJobLimit}${state.heavyStartupJobLimit ? ` (start ${state.heavyStartupJobLimit})` : ''} · preload ${preload ? 'ativo' : 'off'}${state.headerOpenMs != null ? ` · header ${(state.headerOpenMs/1000).toFixed(1)} s` : ''}${state.progressivePreviewMs != null ? ` · preview ${(state.progressivePreviewMs/1000).toFixed(1)} s` : ''}${state.firstViewMs != null ? ` · detalhe ${(state.firstViewMs/1000).toFixed(1)} s` : ''}`;
+    ui.diagCache.textContent = `${cfg.label} · ${startupModeLabel(state.progressiveMode)} · Smart Cache ${smartCache.loadedCount}/${smartCache.targetCount} · hit ${smartCache.hitRate}% · re-decode ${smartCache.redecodes} · fila ${activeJobLimit}${state.heavyStartupJobLimit ? ` (start ${state.heavyStartupJobLimit})` : ''} · preload ${preload ? 'ativo' : 'off'}${state.headerOpenMs != null ? ` · header ${(state.headerOpenMs/1000).toFixed(1)} s` : ''}${instantOpenEngine.snapshot.viewerOpenMs != null ? ` · viewer ${(instantOpenEngine.snapshot.viewerOpenMs/1000).toFixed(1)} s` : ''}${state.firstPixelMs != null ? ` · pixel ${(state.firstPixelMs/1000).toFixed(1)} s` : ''}${state.deferredOpenMs != null ? ` · interativo ${(state.deferredOpenMs/1000).toFixed(1)} s` : ''}`;
     return;
   }
 
@@ -3055,7 +3573,7 @@ function updateDiagnostics() {
   ui.diagTiles.textContent = `ok ${state.tileLoadedCount} · falhas ${state.tileFailedCount} · abortos ${state.tileAbortedCount}${currentDziLevel !== null ? ` · nível ${tileCountCurrent}` : ''}`;
   const schedulerMode = state.tileSchedulerMoving ? 'movimento' : 'refino';
   const predictive = predictiveNavigation?.snapshot || { state: 'standby', requested: 0, completed: 0, predictions: 0, speedViewportPerSec: 0, lastReason: '—' };
-  ui.diagCache.textContent = `${cfg.label} · Smart Cache ${smartCache.loadedCount}/${smartCache.targetCount} · hit ${smartCache.hitRate}% (${smartCache.hits}/${smartCache.misses}) · re-decode ${smartCache.redecodes} · ~${smartCache.estimatedMiB} MiB · foco L${smartCache.focusLevel ?? '—'} · podas ${smartCache.trimmedTiles} · Predictive ${predictive.state} ${predictive.completed}/${predictive.requested} · ${predictive.speedViewportPerSec} vp/s · fila ${state.tileSchedulerJobLimit || activeJobLimit} · scheduler ${schedulerMode} ${state.tileSchedulerMaxTilesPerFrame || 1}/frame · pressão ${pressure.label} ${pressure.score ?? 0} · ${pressure.totalMs || 0} ms/tile · lag ${pressure.eventLoopLagMs || 0} ms · descartes ${state.tileSchedulerDiscardedJobs}${preload ? ' · preload ativo' : ' · preload off'}${compareActive ? ` · compare cache ${Math.max(0, cachedTiles - smartCache.loadedCount)}` : ''}`;
+  ui.diagCache.textContent = `${cfg.label} · Smart Cache ${smartCache.loadedCount}/${smartCache.targetCount} · hit ${smartCache.hitRate}% (${smartCache.hits}/${smartCache.misses}) · re-decode ${smartCache.redecodes} · ~${smartCache.estimatedMiB} MiB · foco L${smartCache.focusLevel ?? '—'} · podas ${smartCache.trimmedTiles} · Predictive ${predictive.state} ${predictive.completed}/${predictive.requested} · ${predictive.speedViewportPerSec} vp/s · fila ${state.tileSchedulerJobLimit || activeJobLimit} · scheduler ${schedulerMode} ${state.tileSchedulerMaxTilesPerFrame || 1}/frame · pressão ${pressure.label} ${pressure.score ?? 0} · ${pressure.totalMs || 0} ms/tile · lag ${pressure.eventLoopLagMs || 0} ms · descartes ${state.tileSchedulerDiscardedJobs}${preload ? ' · preload ativo' : ' · preload off'} · Instant ${instantOpenEngine.snapshot.stage}${state.firstPixelMs != null ? ` pixel ${(state.firstPixelMs/1000).toFixed(1)} s` : ''}${state.deferredOpenMs != null ? ` interativo ${(state.deferredOpenMs/1000).toFixed(1)} s` : ''}${compareActive ? ` · compare cache ${Math.max(0, cachedTiles - smartCache.loadedCount)}` : ''}`;
 }
 
 function updateStartupDiagnostics() {
@@ -3509,6 +4027,8 @@ function setMeasureMode(enabled) {
     ? 'Modo ativo: marque <strong>dois pontos</strong>. Você pode repetir para criar outras medições.'
     : 'Ative <strong>Medir</strong> e marque dois pontos na lâmina.';
   renderMeasurements();
+  syncMobileDockState();
+  if (state.measureMode) showMobileChrome({ holdMs: 1200 });
 }
 
 function toggleMeasureMode() {
@@ -3792,6 +4312,8 @@ function setAnnotationMode(mode) {
   ui.finishAreaBtn.disabled = next !== 'area' || state.areaDraft.length < 3;
   ui.cancelAreaBtn.disabled = next !== 'area' || state.areaDraft.length === 0;
   renderAnnotations();
+  syncMobileDockState();
+  if (state.annotationMode) showMobileChrome({ holdMs: 1200 });
 }
 
 function toggleAnnotationMode(mode) {
@@ -5049,7 +5571,7 @@ function getReportHtml({ imageData = '' } = {}) {
   const lessonSection = opts.includeLesson && lessonRows ? `<section><h2>${escapeHtml(state.lessonTitle || 'Sequência do Modo Aula')}</h2><table><thead><tr><th>Etapa</th><th>Título</th><th>Observação</th></tr></thead><tbody>${lessonRows}</tbody></table></section>` : '';
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${escapeHtml(identity.title)}</title><style>
   *{box-sizing:border-box}body{font:14px Inter,system-ui,sans-serif;margin:0;color:#1f2530;background:#eef1f5}.page{max-width:920px;margin:24px auto;background:white;box-shadow:0 12px 42px #0002}.head{padding:30px 38px 24px;background:#151820;color:#fff;border-top:7px solid #d92335}.head h1{margin:0;font-size:27px}.head p{margin:6px 0 0;color:#b9c0ca}.content{padding:28px 38px 38px}.identity{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:0 0 20px}.identity div,.meta div{padding:10px 12px;background:#f4f6f8;border-radius:8px}.identity b,.meta b{display:block;font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px}.meta{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:0 0 26px}.meta div{font-size:12px}.shot{display:block;width:100%;max-height:520px;object-fit:contain;border:1px solid #d8dde4;border-radius:10px;background:#f3f4f6}h2{font-size:16px;margin:28px 0 10px}table{border-collapse:collapse;width:100%;margin:0 0 20px}th,td{border-bottom:1px solid #e0e4ea;padding:9px 8px;text-align:left;vertical-align:top}th{font-size:10px;color:#667085;text-transform:uppercase}.num{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;color:white;font-weight:800}.foot{padding:16px 38px;border-top:1px solid #e2e6eb;color:#737b87;font-size:10px;display:flex;justify-content:space-between}.no-print{padding:0 38px 30px}@media(max-width:700px){.page{margin:0}.identity,.meta{grid-template-columns:1fr 1fr}.content,.head,.foot{padding-left:20px;padding-right:20px}}@media print{body{background:white}.page{max-width:none;margin:0;box-shadow:none}.no-print{display:none}@page{size:A4;margin:12mm}}
-  </style></head><body><article class="page"><header class="head"><h1>${escapeHtml(identity.title)}</h1><p>Virtum SVS Viewer · relatório local · v0.5.6</p></header><div class="content"><div class="identity"><div><b>Professor(a)</b>${escapeHtml(identity.professor || '—')}</div><div><b>Aluno(a)</b>${escapeHtml(identity.student || '—')}</div><div><b>Instituição / disciplina</b>${escapeHtml(identity.institution || '—')}</div><div><b>Sessão / categoria</b>${escapeHtml([identity.session, identity.category].filter(Boolean).join(' · ') || '—')}</div></div><div class="meta"><div><b>Lâmina</b>${escapeHtml(payload.slide.name)}</div><div><b>Dimensões</b>${escapeHtml(payload.slide.width)} × ${escapeHtml(payload.slide.height)} px</div><div><b>Ampliação</b>${state.objectivePower ? `${escapeHtml(state.objectivePower)}×` : 'não informado'}</div><div><b>MPP</b>${payload.slide.mppX ? `${escapeHtml(payload.slide.mppX)} µm/px` : 'não informado'}</div></div>${imageSection}${measurementSection}${annotationSection}${lessonSection}</div><footer class="foot"><span>Gerado pelo Virtum SVS Viewer</span><span>${escapeHtml(new Date().toLocaleString('pt-BR'))}</span></footer><div class="no-print"><button onclick="window.print()">Imprimir / Salvar em PDF</button></div></article></body></html>`;
+  </style></head><body><article class="page"><header class="head"><h1>${escapeHtml(identity.title)}</h1><p>Virtum SVS Viewer · relatório local · v0.5.9</p></header><div class="content"><div class="identity"><div><b>Professor(a)</b>${escapeHtml(identity.professor || '—')}</div><div><b>Aluno(a)</b>${escapeHtml(identity.student || '—')}</div><div><b>Instituição / disciplina</b>${escapeHtml(identity.institution || '—')}</div><div><b>Sessão / categoria</b>${escapeHtml([identity.session, identity.category].filter(Boolean).join(' · ') || '—')}</div></div><div class="meta"><div><b>Lâmina</b>${escapeHtml(payload.slide.name)}</div><div><b>Dimensões</b>${escapeHtml(payload.slide.width)} × ${escapeHtml(payload.slide.height)} px</div><div><b>Ampliação</b>${state.objectivePower ? `${escapeHtml(state.objectivePower)}×` : 'não informado'}</div><div><b>MPP</b>${payload.slide.mppX ? `${escapeHtml(payload.slide.mppX)} µm/px` : 'não informado'}</div></div>${imageSection}${measurementSection}${annotationSection}${lessonSection}</div><footer class="foot"><span>Gerado pelo Virtum SVS Viewer</span><span>${escapeHtml(new Date().toLocaleString('pt-BR'))}</span></footer><div class="no-print"><button onclick="window.print()">Imprimir / Salvar em PDF</button></div></article></body></html>`;
 }
 
 async function exportHtmlReport() {
@@ -5137,7 +5659,7 @@ async function exportPdfReport() {
     const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
     const pageWidth = pdf.internal.pageSize.getWidth();
     const contentWidth = pageWidth - 28;
-    pdfPageHeader(pdf, identity.title, 'Virtum SVS Viewer · Reports & Export · v0.5.6');
+    pdfPageHeader(pdf, identity.title, 'Virtum SVS Viewer · Reports & Export · v0.5.9');
     let y = 31;
 
     const identityRows = [
@@ -5497,30 +6019,12 @@ function scheduleRedrawOverlays() {
 
 viewer.addHandler('open', () => {
   viewer.viewport.goHome(true);
-  setViewerControlsEnabled(true);
-  if (state.pendingAutosaveData) {
-    try {
-      applyProjectData(state.pendingAutosaveData, { safe: true, resetHistoryAfter: true });
-      const time = state.autosaveSavedAt ? new Date(state.autosaveSavedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : null;
-      if (state.activeSessionName) {
-        setAutosaveStatus(`Sessão · ${state.activeSessionName}`, 'saved');
-        showToast(`Sessão restaurada: ${state.activeSessionName}`, 'success');
-      } else {
-        setAutosaveStatus(time ? `Autosave local · ${time}` : 'Autosave local · restaurado', 'saved');
-        showToast('Sessão local restaurada', 'success');
-      }
-    } catch (error) {
-      console.warn('Não foi possível restaurar o autosave:', error);
-      resetHistory();
-      setAutosaveStatus('Autosave local · ativo', 'idle');
-    } finally {
-      state.pendingAutosaveData = null;
-    }
-  } else {
-    resetHistory();
-  }
+  // v0.5.8: a restauração de sessão e os metadados completos saíram do
+  // caminho crítico. Aqui só configuramos o necessário para o primeiro desenho.
   applyQualityModeSettings();
   smartTileScheduler.notifyOpen();
+  syncMobileViewerMode();
+  syncMobileDockState();
   redrawOverlays();
 });
 viewer.addHandler('zoom', scheduleRedrawOverlays);
@@ -5528,15 +6032,23 @@ viewer.addHandler('pan', scheduleRedrawOverlays);
 viewer.addHandler('animation', scheduleRedrawOverlays);
 viewer.addHandler('rotate', scheduleRedrawOverlays);
 viewer.addHandler('resize', scheduleRedrawOverlays);
-viewer.addHandler('zoom', () => { smartTileScheduler.notifyMotion('zoom'); predictiveNavigation?.notifyNonPanMotion('zoom'); });
-viewer.addHandler('pan', () => { smartTileScheduler.notifyMotion('pan'); predictiveNavigation?.notifyPan(); });
-viewer.addHandler('animation', () => smartTileScheduler.notifyMotion('animation'));
-viewer.addHandler('rotate', () => { smartTileScheduler.notifyMotion('rotate'); predictiveNavigation?.notifyNonPanMotion('rotate'); });
+viewer.addHandler('zoom', () => { smartTileScheduler.notifyMotion('zoom'); predictiveNavigation?.notifyNonPanMotion('zoom'); hideMobileChromeForMotion(); closeMobileLongPressMenu(); });
+viewer.addHandler('pan', () => { smartTileScheduler.notifyMotion('pan'); predictiveNavigation?.notifyPan(); hideMobileChromeForMotion(); closeMobileLongPressMenu(); });
+viewer.addHandler('animation', () => { smartTileScheduler.notifyMotion('animation'); hideMobileChromeForMotion(); });
+viewer.addHandler('rotate', () => { smartTileScheduler.notifyMotion('rotate'); predictiveNavigation?.notifyNonPanMotion('rotate'); hideMobileChromeForMotion(); });
 viewer.addHandler('resize', () => { smartTileScheduler.notifyMotion('resize'); predictiveNavigation?.notifyNonPanMotion('resize'); });
 viewer.addHandler('canvas-move', updatePosition);
 viewer.addHandler('canvas-exit', () => { ui.positionText.textContent = 'Posição —'; });
 viewer.addHandler('canvas-click', (event) => {
   if (!hasOpenSlide() || !event.quick) return;
+  if (state.mobileViewer2 && mobileGestureGuard.shouldBlockQuickTap()) {
+    event.preventDefaultAction = true;
+    return;
+  }
+  if (state.mobileViewer2 && state.mobileChromeHidden && !state.measureMode && !state.annotationMode) {
+    showMobileChrome({ holdMs: 1100 });
+    return;
+  }
   if (!state.measureMode && !state.annotationMode) return;
   event.preventDefaultAction = true;
   const viewportPoint = viewer.viewport.pointFromPixel(event.position, true);
@@ -5549,7 +6061,16 @@ viewer.addHandler('canvas-click', (event) => {
   else if (state.annotationMode === 'area') addAreaPoint(imagePoint);
 });
 viewer.addHandler('canvas-double-click', (event) => {
-  if (!hasOpenSlide() || state.measureMode || state.annotationMode || state.presentationMode || state.lessonPresenting || !event?.position) return;
+  if (!hasOpenSlide() || !event?.position) return;
+  if (state.mobileViewer2) {
+    // Mobile Viewer 2.0 reserva o double-tap para o zoom nativo do OSD.
+    // Com ferramenta ativa, bloqueamos o zoom duplo para não mover a lâmina
+    // enquanto o usuário está marcando ou medindo.
+    if (state.measureMode || state.annotationMode) event.preventDefaultAction = true;
+    else showMobileChrome({ holdMs: 700 });
+    return;
+  }
+  if (state.measureMode || state.annotationMode || state.presentationMode || state.lessonPresenting) return;
   event.preventDefaultAction = true;
   const viewportPoint = viewer.viewport.pointFromPixel(event.position, true);
   const imagePoint = viewer.viewport.viewportToImageCoordinates(viewportPoint);
@@ -5562,25 +6083,34 @@ viewer.addHandler('tile-loaded', (event) => {
     state.tileLoaded = true;
     state.awaitingFirstTile = false;
     clearFirstTileTimer();
-    setBusy(false);
-    releaseHeavyStartupThrottle('first-view');
-    const hadPreview = state.progressivePreviewReady;
-    const previewTiming = state.progressivePreviewMs;
-    resetProgressivePreview();
-    redrawOverlays();
-    state.firstViewMs = state.openStartedAt ? performance.now() - state.openStartedAt : null;
-    const timing = state.firstTileTotalMs != null ? ` · tile ${Math.round(state.firstTileTotalMs)} ms` : '';
-    const totalTiming = state.firstViewMs != null ? ` · detalhe ${(state.firstViewMs / 1000).toFixed(1)} s` : '';
-    const previewPart = hadPreview && previewTiming != null ? ` · preview ${(previewTiming / 1000).toFixed(1)} s` : '';
-    setStartupPhase(`Lâmina pronta${previewPart}${timing}${totalTiming}`);
-    if (state.currentFile) {
-      const fastTiming = state.firstViewMs != null ? ` · ${(state.firstViewMs / 1000).toFixed(1)} s` : '';
-      setStatus(`${state.currentFile.name} · pronta${fastTiming}${hadPreview && previewTiming != null ? ` · preview ${(previewTiming / 1000).toFixed(1)} s` : ''} · ${qualitySummaryText(screenPixelsPerImagePixel())}`);
-    }
+    instantOpenEngine.markFirstTile();
+    state.firstTileLoadedMs = instantOpenEngine.snapshot.firstTileMs;
+    setInstantOpenBadge(true, 'Instant Open · tile pronto · desenhando primeiro pixel…');
+    setStartupPhase(`Instant Open · primeiro tile pronto${state.firstTileTotalMs != null ? ` · ${Math.round(state.firstTileTotalMs)} ms` : ''} · desenhando…`);
+    scheduleDiagnosticsUpdate();
   }
 });
 viewer.addHandler('tile-drawn', (event) => {
   smartCacheEngine.recordDraw(event?.tile);
+  benchmarkDiagnostics.recordDraw();
+  if (!state.firstTileDrawn) {
+    state.firstTileDrawn = true;
+    releaseHeavyStartupThrottle('first-view');
+    const hadPreview = state.progressivePreviewReady;
+    const previewTiming = state.progressivePreviewMs;
+    markInstantFirstPixel('tile');
+    if (hadPreview) resetProgressivePreview();
+    redrawOverlays();
+
+    const firstPixel = state.firstPixelMs != null ? ` · primeiro pixel ${(state.firstPixelMs / 1000).toFixed(1)} s` : '';
+    const tileTiming = state.firstTileTotalMs != null ? ` · tile ${Math.round(state.firstTileTotalMs)} ms` : '';
+    const previewPart = hadPreview && previewTiming != null ? ` · preview ${(previewTiming / 1000).toFixed(1)} s` : '';
+    setStartupPhase(`Imagem visível${firstPixel}${previewPart}${tileTiming} · finalizando dados secundários`);
+    if (state.currentFile) {
+      setStatus(`${state.currentFile.name} · imagem visível${firstPixel} · refinando resolução…`);
+    }
+    scheduleDeferredOpenTasks();
+  }
 });
 viewer.addHandler('tile-unloaded', (event) => {
   smartCacheEngine.recordUnloaded(event || {});
@@ -5747,10 +6277,34 @@ ui.memorySafeToggle.addEventListener('change', () => setMemorySafeMode(ui.memory
 ui.startupSafeModeToggle.addEventListener('change', () => setMemorySafeMode(ui.startupSafeModeToggle.checked, { userSet: true, notify: true }));
 ui.rerunBenchmarkBtn.addEventListener('click', () => rerunBenchmarkAction(ui.rerunBenchmarkBtn));
 ui.startupRerunBenchmarkBtn.addEventListener('click', () => rerunBenchmarkAction(ui.startupRerunBenchmarkBtn));
+ui.copyBenchmarkBtn?.addEventListener('click', copyBenchmarkReport);
+ui.exportBenchmarkBtn?.addEventListener('click', exportBenchmarkReport);
+ui.resetBenchmarkBtn?.addEventListener('click', resetSessionBenchmark);
 ui.resetVisualBtn.addEventListener('click', () => resetVisualAdjustments(true));
 ui.undoBtn.addEventListener('click', undoHistory);
 ui.redoBtn.addEventListener('click', redoHistory);
 ui.panelBtn.addEventListener('click', toggleSidebar);
+ui.mobilePanelBtn?.addEventListener('click', () => { showMobileChrome({ holdMs: 1200 }); openSidebar(); });
+ui.mobileHomeBtn?.addEventListener('click', () => { goHome(); showMobileChrome({ holdMs: 800 }); });
+ui.mobileMeasureBtn?.addEventListener('click', () => { toggleMeasureMode(); syncMobileDockState(); });
+ui.mobileAnnotateBtn?.addEventListener('click', () => { toggleAnnotationMode('marker'); syncMobileDockState(); });
+ui.mobileFullscreenBtn?.addEventListener('click', toggleViewerFullscreen);
+ui.mobileLongPressMarkerBtn?.addEventListener('click', () => {
+  const point = state.mobileLongPressPoint;
+  closeMobileLongPressMenu();
+  if (!point || !hasOpenSlide()) return;
+  mobileGestureGuard.consumeLongPress();
+  openAnnotationDialog({ draft: { type: 'marker', point: { x: point.x, y: point.y } } });
+});
+ui.mobileLongPressMeasureBtn?.addEventListener('click', () => {
+  const point = state.mobileLongPressPoint;
+  closeMobileLongPressMenu();
+  if (!point || !hasOpenSlide()) return;
+  mobileGestureGuard.consumeLongPress();
+  setMeasureMode(true);
+  addMeasurementPoint(point);
+  setStatus('Medição iniciada pelo toque longo · selecione o segundo ponto.');
+});
 ui.collapseSidebarBtn.addEventListener('click', () => setSidebarCollapsed(true));
 ui.sidebarRevealBtn.addEventListener('click', () => setSidebarCollapsed(false));
 ui.sidebarBackdrop.addEventListener('click', closeSidebar);
@@ -5786,16 +6340,7 @@ ui.rotateBtn.addEventListener('click', () => {
   redrawOverlays();
   commitHistory();
 });
-ui.fullscreenBtn.addEventListener('click', async () => {
-  try {
-    closeSidebar();
-    if (!document.fullscreenElement) await ui.viewerShell.requestFullscreen();
-    else await document.exitFullscreen();
-  } catch (error) {
-    console.warn('Não foi possível alternar tela cheia:', error);
-    setStatus('O navegador bloqueou a troca para tela cheia.');
-  }
-});
+ui.fullscreenBtn.addEventListener('click', toggleViewerFullscreen);
 
 window.addEventListener('keydown', (event) => {
   const target = event.target;
@@ -5852,6 +6397,53 @@ window.addEventListener('keydown', (event) => {
   }
 });
 
+ui.viewer.addEventListener('pointerdown', (event) => {
+  if (!state.mobileViewer2 || event.pointerType !== 'touch') return;
+  closeMobileLongPressMenu();
+  const now = performance.now();
+  const snapshot = mobileGestureGuard.pointerDown(event.pointerId, event.clientX, event.clientY, now);
+  if (snapshot.pointerCount > 1) {
+    cancelMobileLongPressTimer();
+    return;
+  }
+  if (!hasOpenSlide() || state.measureMode || state.annotationMode || state.presentationMode || state.lessonPresenting) return;
+  if (ui.sidebar.classList.contains('open') || !ui.moreMenu.hidden || anyModalDialogOpen()) return;
+
+  cancelMobileLongPressTimer();
+  state.mobileLongPressPointerId = event.pointerId;
+  const startX = event.clientX;
+  const startY = event.clientY;
+  state.mobileLongPressTimer = window.setTimeout(() => {
+    state.mobileLongPressTimer = null;
+    if (!mobileGestureGuard.canLongPress(event.pointerId)) return;
+    const viewerRect = ui.viewer.getBoundingClientRect();
+    const px = startX - viewerRect.left;
+    const py = startY - viewerRect.top;
+    if (px < 0 || py < 0 || px > viewerRect.width || py > viewerRect.height) return;
+    const viewportPoint = viewer.viewport.pointFromPixel(new OpenSeadragon.Point(px, py), true);
+    const imagePoint = viewer.viewport.viewportToImageCoordinates(viewportPoint);
+    if (!Number.isFinite(imagePoint.x) || !Number.isFinite(imagePoint.y)) return;
+    mobileGestureGuard.consumeLongPress();
+    showMobileLongPressMenu(startX, startY, imagePoint);
+  }, 560);
+}, { capture: true, passive: true });
+
+ui.viewer.addEventListener('pointermove', (event) => {
+  if (!state.mobileViewer2 || event.pointerType !== 'touch') return;
+  mobileGestureGuard.pointerMove(event.pointerId, event.clientX, event.clientY);
+  if (state.mobileLongPressPointerId === event.pointerId && !mobileGestureGuard.canLongPress(event.pointerId)) {
+    cancelMobileLongPressTimer();
+  }
+}, { capture: true, passive: true });
+
+const endMobilePointer = (event) => {
+  if (!state.mobileViewer2 || event.pointerType !== 'touch') return;
+  mobileGestureGuard.pointerUp(event.pointerId);
+  if (state.mobileLongPressPointerId === event.pointerId) cancelMobileLongPressTimer();
+};
+ui.viewer.addEventListener('pointerup', endMobilePointer, { capture: true, passive: true });
+ui.viewer.addEventListener('pointercancel', endMobilePointer, { capture: true, passive: true });
+
 ui.viewerShell.addEventListener('dragenter', (event) => {
   event.preventDefault();
   state.dragDepth += 1;
@@ -5873,6 +6465,8 @@ ui.viewerShell.addEventListener('drop', (event) => {
 
 window.addEventListener('resize', () => {
   if (window.innerWidth > 760) closeSidebar();
+  syncMobileViewerMode();
+  updateMobileViewportHeight();
   window.requestAnimationFrame(() => {
     if (state.compareActive) {
       try {
@@ -5885,6 +6479,8 @@ window.addEventListener('resize', () => {
 });
 
 document.addEventListener('fullscreenchange', () => window.requestAnimationFrame(() => {
+  syncMobileDockState();
+  showMobileChrome({ holdMs: 700 });
   if (state.compareActive) {
     try {
       compareViewer.viewport.resize(new OpenSeadragon.Point(ui.compareViewer.clientWidth, ui.compareViewer.clientHeight), true);
@@ -5893,6 +6489,27 @@ document.addEventListener('fullscreenchange', () => window.requestAnimationFrame
   }
   redrawOverlays();
 }));
+
+window.addEventListener('orientationchange', () => {
+  showMobileChrome({ holdMs: 900 });
+  const center = hasOpenSlide() ? viewer.viewport.getCenter(true) : null;
+  const zoom = hasOpenSlide() ? viewer.viewport.getZoom(true) : null;
+  window.setTimeout(() => {
+    updateMobileViewportHeight();
+    syncMobileViewerMode();
+    if (center && zoom && ui.viewer.clientWidth > 0 && ui.viewer.clientHeight > 0) {
+      try {
+        viewer.viewport.resize(new OpenSeadragon.Point(ui.viewer.clientWidth, ui.viewer.clientHeight), true);
+        viewer.viewport.panTo(center, true);
+        viewer.viewport.zoomTo(zoom, center, true);
+        viewer.viewport.applyConstraints();
+      } catch (_) {}
+    }
+    refreshAfterLayoutChange();
+  }, 140);
+});
+window.visualViewport?.addEventListener('resize', updateMobileViewportHeight, { passive: true });
+window.visualViewport?.addEventListener('scroll', updateMobileViewportHeight, { passive: true });
 
 window.addEventListener('beforeunload', (event) => {
   const volatile = hasVolatileWork();
@@ -5922,6 +6539,7 @@ window.addEventListener('pagehide', () => {
 
 function bootstrap() {
   loadPreferences();
+  syncMobileViewerMode();
   applyStartupMemorySafety();
   if (state.memorySafeMode) state.highDefinition = false;
   migrateAutosavesIntoLibrary();
@@ -5945,6 +6563,7 @@ function bootstrap() {
   renderLibrary();
   ui.libraryScreen.hidden = false;
   ui.app.classList.add('library-open');
+  syncMobileViewerMode();
 
   const compatibilityProblem = getCompatibilityProblem();
   if (compatibilityProblem) {

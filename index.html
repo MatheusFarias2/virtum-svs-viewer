@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0c0d0f" />
-  <meta name="description" content="Visualizador local de lâminas histológicas SVS com Predictive Navigation, Smart Cache Engine e Heavy Slide Engine, anotações, medições, comparação, modo aula e relatórios." />
+  <meta name="description" content="Visualizador local de lâminas histológicas SVS com Benchmark & Diagnostics, Mobile Viewer 2.0, Instant Open, Predictive Navigation, Smart Cache Engine e Heavy Slide Engine." />
   <meta name="application-name" content="Virtum SVS Viewer" />
   <meta name="referrer" content="no-referrer" />
   <meta name="format-detection" content="telephone=no" />
@@ -19,7 +19,7 @@
         <img src="./assets/icon.svg" alt="" width="30" height="30" />
         <div class="brand-copy">
           <strong>Virtum SVS Viewer</strong>
-          <span>v0.5.6 · Predictive Navigation</span>
+          <span>v0.5.9 · Benchmark & Diagnostics</span>
         </div>
       </div>
 
@@ -317,6 +317,32 @@
               <p id="qualityHint" class="measure-help">Sem lâmina aberta.</p>
             </section>
 
+            <section class="benchmark-session-card">
+              <div class="section-title-row benchmark-title-row">
+                <div>
+                  <h2>Benchmark da sessão</h2>
+                  <p class="measure-help">Mede o uso real desta lâmina. Os números são locais e não são enviados para nenhum servidor.</p>
+                </div>
+                <strong id="diagSessionScore" class="benchmark-score">—</strong>
+              </div>
+              <div class="benchmark-grid">
+                <article class="benchmark-metric"><span>First Pixel</span><strong id="diagFirstPixel">—</strong></article>
+                <article class="benchmark-metric"><span>Interactive</span><strong id="diagInteractive">—</strong></article>
+                <article class="benchmark-metric"><span>FPS</span><strong id="diagFps">—</strong></article>
+                <article class="benchmark-metric"><span>Frame p95</span><strong id="diagFrameP95">—</strong></article>
+                <article class="benchmark-metric"><span>Tile latency</span><strong id="diagTileLatency">—</strong></article>
+                <article class="benchmark-metric"><span>Decode</span><strong id="diagDecodeLatency">—</strong></article>
+                <article class="benchmark-metric benchmark-metric-wide"><span>Smart Cache</span><strong id="diagCacheRate">—</strong></article>
+                <article class="benchmark-metric benchmark-metric-wide"><span>Pressão máxima</span><strong id="diagPressurePeak">—</strong></article>
+                <article class="benchmark-metric benchmark-metric-wide"><span>Estabilidade</span><strong id="diagRuntimeErrors">—</strong></article>
+              </div>
+              <div class="diagnostic-actions benchmark-actions">
+                <button id="copyBenchmarkBtn" class="small-btn" type="button">Copiar relatório</button>
+                <button id="exportBenchmarkBtn" class="small-btn" type="button">Exportar JSON</button>
+                <button id="resetBenchmarkBtn" class="text-button" type="button">Zerar sessão</button>
+              </div>
+            </section>
+
             <section>
               <h2>Atalhos</h2>
               <div class="shortcut-grid">
@@ -372,6 +398,7 @@
         <div id="viewer" class="viewer"></div>
         <canvas id="progressivePreview" class="progressive-preview" aria-hidden="true" hidden></canvas>
         <div id="progressiveBadge" class="progressive-badge" role="status" aria-live="polite" hidden>Preview pronto · refinando…</div>
+        <div id="instantOpenBadge" class="progressive-badge instant-open-badge" role="status" aria-live="polite" hidden>Instant Open · buscando primeira imagem…</div>
         <svg id="measurementOverlay" class="measurement-overlay" aria-hidden="true"></svg>
         <svg id="annotationOverlay" class="annotation-overlay" aria-hidden="true"></svg>
 
@@ -412,6 +439,29 @@
           <div class="spinner"></div>
           <strong id="busyTitle">Inicializando...</strong>
           <span id="busyText">Preparando o motor de lâminas</span>
+        </div>
+
+        <nav id="mobileDock" class="mobile-dock" aria-label="Controles rápidos mobile" hidden>
+          <button id="mobilePanelBtn" class="mobile-dock-btn" type="button" aria-label="Abrir painel">
+            <span class="mobile-dock-icon" aria-hidden="true">☰</span><span>Painel</span>
+          </button>
+          <button id="mobileHomeBtn" class="mobile-dock-btn" type="button" aria-label="Ajustar lâmina à tela">
+            <span class="mobile-dock-icon" aria-hidden="true">⌾</span><span>Ajustar</span>
+          </button>
+          <button id="mobileMeasureBtn" class="mobile-dock-btn" type="button" aria-label="Medir distância" aria-pressed="false">
+            <span class="mobile-dock-icon" aria-hidden="true">↔</span><span>Medir</span>
+          </button>
+          <button id="mobileAnnotateBtn" class="mobile-dock-btn" type="button" aria-label="Adicionar anotação" aria-pressed="false">
+            <span class="mobile-dock-icon" aria-hidden="true">＋</span><span>Anotar</span>
+          </button>
+          <button id="mobileFullscreenBtn" class="mobile-dock-btn" type="button" aria-label="Alternar tela cheia">
+            <span class="mobile-dock-icon" aria-hidden="true">⛶</span><span>Tela</span>
+          </button>
+        </nav>
+
+        <div id="mobileLongPressMenu" class="mobile-longpress-menu" role="menu" aria-label="Ação rápida" hidden>
+          <button id="mobileLongPressMarkerBtn" type="button" role="menuitem">＋ Marcar aqui</button>
+          <button id="mobileLongPressMeasureBtn" type="button" role="menuitem">↔ Medir daqui</button>
         </div>
       </section>
     </main>

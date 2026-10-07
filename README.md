@@ -1,7 +1,67 @@
-# Virtum SVS Viewer v0.5.6 · Predictive Navigation
+# Virtum SVS Viewer v0.5.9 · Benchmark & Diagnostics
 
-A v0.5.6 mantém o Heavy Slide Engine e a Smart Cache Engine e adiciona **Predictive Navigation**. O viewer aprende a direção e a velocidade do pan e aquece somente uma faixa curta de tiles à frente, sempre sob os limites de cache e backpressure.
+A v0.5.9 adiciona telemetria local de sessão para medir First Pixel, FPS, frame p95, latência de tile/decode, cache, pressão e estabilidade. O objetivo é comparar dispositivos e lâminas com números reproduzíveis sem alterar o pipeline estável da v0.5.8.
 
+## Benchmark & Diagnostics · v0.5.9
+
+- benchmark automático por lâmina;
+- score de sessão 0–100;
+- FPS atual/médio e frame p95;
+- tile/decode médio e p95;
+- métricas Smart Cache;
+- pico de Backpressure e event-loop lag;
+- exportação textual e JSON;
+- reset da sessão para testes A/B.
+
+
+A v0.5.8 mantém o Heavy Slide Engine, Smart Cache, Predictive Navigation e Instant Open e adiciona uma interface touch dedicada para tablets e celulares, sem alterar o pipeline pesado que já estava estável.
+
+
+## Mobile Viewer 2.0 · v0.5.8
+
+A v0.5.8 mantém todo o pipeline da v0.5.7 e adiciona uma camada de experiência específica para touch/tablet:
+
+- viewer imersivo: topbar e status viram overlays sobre a lâmina;
+- dock mobile com Painel, Ajustar, Medir, Anotar e Tela cheia;
+- chrome some durante pan/zoom e reaparece após a navegação;
+- double-tap fica reservado ao zoom no mobile;
+- pinch/two-finger ganha cooldown contra cliques acidentais;
+- toque longo abre ações rápidas **Marcar aqui** e **Medir daqui**;
+- orientação retrato/paisagem preserva centro e zoom;
+- em landscape baixo, o dock muda para a lateral;
+- safe-area para tablets/celulares com recortes e barras de sistema;
+- fallback de modo imersivo quando o Fullscreen API não estiver disponível.
+
+### Teste recomendado
+
+1. abra uma lâmina pesada no tablet;
+2. faça pan e pinch rapidamente e confirme que as barras somem sem interferir na navegação;
+3. pare por ~1 s e confirme o retorno dos controles;
+4. dê double-tap em uma região e confirme o zoom;
+5. faça pinch e solte: nenhum marcador/medição deve surgir por acidente;
+6. segure um dedo parado por ~560 ms e teste **Marcar aqui / Medir daqui**;
+7. gire o tablet e confirme que a região observada permanece no mesmo lugar.
+
+## Instant Open · v0.5.7
+
+A abertura agora possui uma **First Pixel Lane**.
+
+- cabeçalho e pirâmide continuam obrigatórios;
+- assim que a pirâmide existe, o OpenSeadragon recebe a fonte imediatamente;
+- metadados completos, biblioteca, autosave e restauração de sessão são adiados para depois do primeiro pixel;
+- o overlay escuro de carregamento não fica cobrindo o canvas enquanto o primeiro tile é desenhado;
+- `tile-loaded` e `tile-drawn` são medidos separadamente;
+- o diagnóstico mostra `header`, `viewer`, `primeiro pixel` e `interativo`;
+- Heavy/Ultra continuam com throttle até a primeira imagem realmente aparecer;
+- preview manual é apenas fallback raro e nunca entra na frente do caminho Heavy/Mobile.
+
+### Como validar
+
+1. abra uma lâmina conhecida e observe o badge `Instant Open`;
+2. compare o tempo `pixel` no painel de diagnóstico com versões anteriores;
+3. confirme que a imagem aparece antes de biblioteca/autosave terminarem;
+4. abra uma sessão salva e confirme que anotações são restauradas logo após a primeira imagem;
+5. em lâmina pesada, confirme que Scheduler/Backpressure continuam ativos durante a abertura.
 
 ## Predictive Navigation · v0.5.6
 
@@ -154,6 +214,9 @@ Executa:
 ```bash
 npm run test:scheduler
 npm run test:backpressure
+npm run test:cache
+npm run test:predictive
+npm run test:instant
 ```
 
 Para testar runtime + build de produção no Windows:
@@ -185,7 +248,7 @@ O arquivo `.SVS` continua sendo processado localmente no navegador. O projeto n�
 
 ## Release
 
-**Virtum SVS Viewer v0.5.6 · Predictive Navigation** continua a sequência:
+**Virtum SVS Viewer v0.5.8 · Mobile Viewer 2.0** continua a sequência:
 
 - `v0.5.4.0` · Heavy Slide Safety
 - `v0.5.4.1` · Pyramid First
@@ -196,3 +259,7 @@ As quatro fases permanecem identificáveis internamente, mas passam a ser distri
 
 - `v0.5.5` · Smart Cache Engine
 - `v0.5.6` · Predictive Navigation
+- `v0.5.7` · Instant Open
+- `v0.5.8` · Mobile Viewer 2.0
+
+- `v0.5.9` · Benchmark & Diagnostics
