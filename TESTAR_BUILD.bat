@@ -1,16 +1,16 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title Teste de build - Virtum SVS Viewer v0.5.4.2
+title Teste de build - Virtum SVS Viewer v0.5.6
 
 echo Limpando build anterior...
 if exist dist rmdir /s /q dist
 
-echo Testando Smart Tile Scheduler...
-call npm run test:scheduler
+echo Testando Heavy Slide Engine + Smart Cache + Predictive Navigation...
+call npm run test:runtime
 if errorlevel 1 (
   echo.
-  echo [ERRO] O teste do scheduler falhou.
+  echo [ERRO] Os testes de runtime falharam.
   pause
   exit /b 1
 )
