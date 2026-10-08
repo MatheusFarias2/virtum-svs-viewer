@@ -8,7 +8,9 @@ const patch = readFileSync(new URL('../mobile-wasm/patch-build.py', import.meta.
 const manifest = JSON.parse(readFileSync(new URL('../public/wasm-mobile/manifest.template.json', import.meta.url), 'utf8'));
 
 for (const needle of [
-  'Mobile Heavy Open Rescue exige /wasm-mobile/openslide.js + openslide.wasm + manifest.json',
+  "state.wasmVariant = 'stock-rescue'",
+  "markRescueStage('mobile-wasm-fallback'",
+  "state.openslide = await tryLocal('Rescue · I/O local mínimo')",
   "markRescueStage('openslide-open-begin'",
   "markRescueStage('openslide-open-end'",
   "markRescueStage('first-tile-request'",

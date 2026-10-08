@@ -1,6 +1,6 @@
-# Virtum SVS Viewer v0.5.10 · Mobile Heavy Open Rescue
+# Virtum SVS Viewer v0.5.10.1 · Mobile Heavy Open Rescue Hotfix
 
-A v0.5.10 ataca o gargalo anterior ao primeiro tile em tablets. Para SVS >=250 MB, o Viewer reinicia o runtime OpenSlide, exige o Mobile WASM, usa um envelope de I/O/memória mínimo e registra a trilha completa da abertura.
+A v0.5.10.1 corrige um bloqueio da v0.5.10: SVS >=250 MB em tablets não são mais recusadas quando o Mobile WASM customizado não está publicado. O Viewer usa o WASM stock em Rescue controlado, com 1 worker, I/O local primeiro, cache mínimo e telemetria completa.
 
 ## Mobile Heavy Open Rescue
 
@@ -24,7 +24,7 @@ openslide.js
 openslide.wasm
 ```
 
-Sem esses três arquivos, a v0.5.10 **recusa deliberadamente** abrir SVS >=250 MB no mobile, em vez de cair silenciosamente no runtime stock.
+Esses três arquivos agora são **opcionais**. Quando não existem, o Rescue usa o WASM stock em modo controlado (`stock-rescue`) em vez de bloquear a abertura. O Mobile WASM customizado continua sendo preferido quando publicado.
 
 A v0.5.9 adiciona telemetria local de sessão para medir First Pixel, FPS, frame p95, latência de tile/decode, cache, pressão e estabilidade. O objetivo é comparar dispositivos e lâminas com números reproduzíveis sem alterar o pipeline estável da v0.5.8.
 
@@ -277,7 +277,7 @@ O arquivo `.SVS` continua sendo processado localmente no navegador. O projeto n�
 
 ## Release
 
-**Virtum SVS Viewer v0.5.10 · Mobile Heavy Open Rescue** continua a sequência:
+**Virtum SVS Viewer v0.5.10.1 · Mobile Heavy Open Rescue Hotfix** continua a sequência:
 
 - `v0.5.4.0` · Heavy Slide Safety
 - `v0.5.4.1` · Pyramid First

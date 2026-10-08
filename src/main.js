@@ -2681,7 +2681,7 @@ function startupDiagnosticText() {
   const engine = engineSettingsForCurrentMode();
   const benchmark = state.deviceBenchmark;
   return [
-    'Virtum SVS Viewer v0.5.10 · Mobile Heavy Open Rescue',
+    'Virtum SVS Viewer v0.5.10.1 · Mobile Heavy Open Rescue Hotfix',
     `Data: ${new Date().toLocaleString('pt-BR')}`,
     `UA: ${navigator.userAgent || '—'}`,
     `Móvel/tablet: ${detectMobileDevice()}`,
@@ -2777,7 +2777,7 @@ async function resolveOpenSlideWasmAssets() {
     if (rescueRequired) markRescueStage('mobile-wasm-check', 'manifest + binário');
     updateStartupDiagnostics();
     const manifestUrl = new URL(MOBILE_WASM_MANIFEST_URL, window.location.origin);
-    manifestUrl.searchParams.set('v', '0510');
+    manifestUrl.searchParams.set('v', '05101');
     const response = await fetch(manifestUrl, { cache: 'no-store' });
     if (!response.ok) throw new Error(`manifest HTTP ${response.status}`);
     const manifest = await response.json();
@@ -2804,13 +2804,15 @@ async function resolveOpenSlideWasmAssets() {
     };
   } catch (error) {
     if (rescueRequired) {
-      state.wasmVariant = 'mobile-required-missing';
-      state.mobileWasmStatus = 'Rescue bloqueado · Mobile WASM ausente';
-      mobileHeavyOpenRescue.fail('mobile-wasm', error);
-      const failure = new Error(`Mobile Heavy Open Rescue exige /wasm-mobile/openslide.js + openslide.wasm + manifest.json. Fallback stock de 2 GiB foi bloqueado para proteger o tablet. ${error?.message || error}`);
-      failure.code = 'VIRTUM_MOBILE_WASM_REQUIRED';
-      console.error('Rescue não usará stock WASM:', error);
-      throw failure;
+      // Hotfix 0.5.10.1: o Rescue nunca deve impedir a abertura só porque o
+      // Mobile WASM customizado ainda não foi publicado. O WASM stock usa
+      // crescimento de memória; com 1 worker + I/O local + cache mínimo o
+      // envelope continua controlado sem bloquear slides >=250 MB.
+      state.wasmVariant = 'stock-rescue';
+      state.mobileWasmStatus = 'Rescue · WASM padrão controlado';
+      markRescueStage('mobile-wasm-fallback', `stock · ${error?.message || error}`);
+      console.warn('Mobile WASM customizado indisponível; usando WASM stock em Rescue controlado:', error);
+      return stock;
     }
     state.wasmVariant = 'stock-fallback';
     state.mobileWasmStatus = 'Mobile WASM ausente · fallback padrão';
@@ -2989,6 +2991,26 @@ async function ensureOpenSlide() {
       setBusy(true, 'Preparando o microscópio', `Inicializando o motor local de lâminas${safetyText}…`);
 
       const startupMode = slideStartupMode();
+      const rescueActive = mobileHeavyOpenRescue.snapshot.active;
+
+      // Rescue hotfix: com apenas 1 decode worker, o I/O local evita criar o
+      // broker worker adicional durante a fase mais sensível da abertura.
+      // Se o caminho local falhar por motivo não relacionado a memória,
+      // tentamos o broker mínimo como compatibilidade.
+      if (rescueActive) {
+        setBusy(true, 'Mobile Heavy Open Rescue', '1 worker · I/O local · cache mínimo…');
+        setStartupPhase('Rescue · inicialização local mínima');
+        try {
+          state.openslide = await tryLocal('Rescue · I/O local mínimo');
+        } catch (rescueLocalError) {
+          state.lastEngineError = explainInitError(rescueLocalError);
+          if (isMemoryPressureError(rescueLocalError)) throw rescueLocalError;
+          console.warn('Rescue local falhou; tentando broker mínimo:', rescueLocalError);
+          setBusy(true, 'Rescue · fallback I/O', 'Tentando broker compartilhado mínimo…');
+          setStartupPhase('Rescue · fallback broker mínimo');
+          state.openslide = await tryBroker('Rescue · broker mínimo');
+        }
+      } else {
       const optimizedBrokerFirst = detectMobileDevice() || detectLowPowerDesktop() || startupMode !== 'standard';
       if (optimizedBrokerFirst) {
         // Para mobile/Chromebook e lâminas maiores, o broker compartilhado evita
@@ -3050,6 +3072,7 @@ async function ensureOpenSlide() {
             }
           }
         }
+      }
       }
 
       state.ready = true;
@@ -3529,7 +3552,7 @@ function benchmarkTextReport() {
   const report = benchmarkReportPayload();
   const m = report.metrics;
   return [
-    'Virtum SVS Viewer v0.5.10 · Mobile Heavy Open Rescue',
+    'Virtum SVS Viewer v0.5.10.1 · Mobile Heavy Open Rescue Hotfix',
     `Data: ${new Date(report.generatedAt).toLocaleString('pt-BR')}`,
     `Lâmina: ${m.fileName || '—'} · ${m.fileSize ? formatBytes(m.fileSize) : '—'} · ${m.mode}`,
     `Score da sessão: ${report.score.value}/100 · ${report.score.label}`,
@@ -3581,7 +3604,7 @@ async function copyBenchmarkReport() {
 
 function exportBenchmarkReport() {
   const payload = benchmarkReportPayload();
-  const filename = `${sanitizeBaseName(state.currentFile?.name || 'sessao')}_benchmark_v0.5.10.json`;
+  const filename = `${sanitizeBaseName(state.currentFile?.name || 'sessao')}_benchmark_v0.5.10.1.json`;
   downloadBlob(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' }), filename);
   showToast('Benchmark JSON exportado', 'success');
 }
