@@ -17,7 +17,7 @@ if not script.exists():
     raise SystemExit(f"build script not found: {script}")
 
 text = script.read_text()
-if "MAXIMUM_MEMORY=536870912" in text:
+if "MAXIMUM_MEMORY=402653184" in text:
     print("mobile memory flags already present")
     raise SystemExit(0)
 
@@ -27,14 +27,14 @@ if needle not in text:
 
 replacement = needle + (
     "    -s INITIAL_MEMORY=16777216 \\\n"
-    "    -s MAXIMUM_MEMORY=536870912 \\\n"
-    "    -s MEMORY_GROWTH_GEOMETRIC_STEP=0.10 \\\n"
-    "    -s MEMORY_GROWTH_GEOMETRIC_CAP=16777216 \\\n"
+    "    -s MAXIMUM_MEMORY=402653184 \\\n"
+    "    -s MEMORY_GROWTH_GEOMETRIC_STEP=0.05 \\\n"
+    "    -s MEMORY_GROWTH_GEOMETRIC_CAP=8388608 \\\n"
 )
 text = text.replace(needle, replacement, 1)
 script.write_text(text)
 print(f"patched {script}")
 print("  initial memory: 16 MiB")
-print("  maximum memory: 512 MiB")
-print("  growth step: 10%")
-print("  growth cap: 16 MiB")
+print("  maximum memory: 384 MiB")
+print("  growth step: 5%")
+print("  growth cap: 8 MiB")

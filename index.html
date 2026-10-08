@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0c0d0f" />
-  <meta name="description" content="Visualizador local de lâminas histológicas SVS com Benchmark & Diagnostics, Mobile Viewer 2.0, Instant Open, Predictive Navigation, Smart Cache Engine e Heavy Slide Engine." />
+  <meta name="description" content="Visualizador local de lâminas histológicas SVS com Mobile Heavy Open Rescue, Benchmark & Diagnostics, Mobile Viewer 2.0, Instant Open, Predictive Navigation, Smart Cache Engine e Heavy Slide Engine." />
   <meta name="application-name" content="Virtum SVS Viewer" />
   <meta name="referrer" content="no-referrer" />
   <meta name="format-detection" content="telephone=no" />
@@ -19,7 +19,7 @@
         <img src="./assets/icon.svg" alt="" width="30" height="30" />
         <div class="brand-copy">
           <strong>Virtum SVS Viewer</strong>
-          <span>v0.5.9 · Benchmark & Diagnostics</span>
+          <span>v0.5.10 · Mobile Heavy Open Rescue</span>
         </div>
       </div>
 
@@ -306,6 +306,7 @@
                 <div><dt>Perfil automático</dt><dd id="diagAdaptiveProfile">—</dd></div>
                 <div><dt>Workers</dt><dd id="diagWorkers">—</dd></div>
                 <div><dt>Modo de memória</dt><dd id="diagMemoryMode">—</dd></div>
+                <div><dt>Heavy Open Rescue</dt><dd id="diagRescue">Standby</dd></div>
               </dl>
               <label class="toggle-row memory-safe-row" for="memorySafeToggle">
                 <input id="memorySafeToggle" type="checkbox" />
@@ -524,6 +525,7 @@
         <div><dt>Cache / fila</dt><dd id="startupDiagCache">—</dd></div>
         <div><dt>Modo de memória</dt><dd id="startupDiagMemory">—</dd></div>
         <div><dt>Engine</dt><dd id="startupDiagEngine">WASM padrão · não verificado</dd></div>
+        <div><dt>Heavy Open Rescue</dt><dd id="startupDiagRescue">Standby</dd></div>
         <div><dt>Compatibilidade</dt><dd id="startupDiagCompat">—</dd></div>
         <div><dt>Fase atual</dt><dd id="startupDiagPhase">Em espera</dd></div>
         <div><dt>Probe memória WASM</dt><dd id="startupDiagWasmProbe">não executado</dd></div>
@@ -544,7 +546,7 @@
         <input id="startupSafeModeToggle" type="checkbox" />
         <span>Modo seguro para tablet / pouca memória</span>
       </label>
-      <p class="startup-diag-help">No modo seguro o Viewer usa 1 worker, fila 1, cache mínimo e sem retries do WASM em tablets. O Probe testa separadamente se o navegador aceita a memória compartilhada exigida pelo motor.</p>
+      <p class="startup-diag-help">Em mobile com SVS ≥250 MB, o Heavy Open Rescue exige o Mobile WASM e bloqueia o fallback stock de 2 GiB. O Probe testa separadamente se o navegador aceita a memória compartilhada exigida pelo motor.</p>
 
       <div class="startup-diagnostic-tools">
         <button id="startupTestEngineBtn" class="btn primary" type="button">Testar motor</button>

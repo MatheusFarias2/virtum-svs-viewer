@@ -1,7 +1,7 @@
 {
   "name": "virtum-svs-viewer",
   "private": true,
-  "version": "0.5.9",
+  "version": "0.5.10",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,12 +11,14 @@
     "preview": "vite preview",
     "test:scheduler": "node scripts/test-smart-tile-scheduler.mjs",
     "test:backpressure": "node scripts/test-adaptive-backpressure.mjs",
-    "test:runtime": "npm run test:scheduler && npm run test:backpressure && npm run test:cache && npm run test:predictive && npm run test:instant && npm run test:mobile && npm run test:benchmark",
+    "test:runtime": "npm run test:scheduler && npm run test:backpressure && npm run test:cache && npm run test:predictive && npm run test:instant && npm run test:mobile && npm run test:benchmark && npm run test:rescue && npm run test:rescue:integration",
     "test:cache": "node scripts/test-smart-cache-engine.mjs",
     "test:predictive": "node scripts/test-predictive-navigation.mjs",
     "test:instant": "node scripts/test-instant-open.mjs",
     "test:mobile": "node scripts/test-mobile-viewer-2.mjs",
-    "test:benchmark": "node scripts/test-benchmark-diagnostics.mjs"
+    "test:benchmark": "node scripts/test-benchmark-diagnostics.mjs",
+    "test:rescue": "node scripts/test-mobile-heavy-open-rescue.mjs",
+    "test:rescue:integration": "node scripts/test-mobile-heavy-rescue-integration.mjs"
   },
   "dependencies": {
     "@computationalpathologygroup/openslide-js": "1.0.0-beta.4",

@@ -32,7 +32,7 @@ https://SEU-PROJETO.vercel.app/health.txt
 Deve aparecer:
 
 ```text
-Virtum SVS Viewer v0.5.9 · Benchmark & Diagnostics
+Virtum SVS Viewer v0.5.10 · Mobile Heavy Open Rescue
 status=ok
 build=mobile-viewer-2
 ```
@@ -72,7 +72,7 @@ Com o repositório ligado ao Vercel, cada `push` para a branch de produção pod
 A aplicação pode ser publicada antes de gerar o WASM móvel; nesse caso ela usa o
 engine padrão automaticamente.
 
-Para ativar o engine móvel de 512 MiB, depois de subir este projeto ao GitHub:
+Para ativar o engine móvel Rescue de 384 MiB, depois de subir este projeto ao GitHub:
 
 1. GitHub → **Actions**;
 2. **Build Mobile OpenSlide WASM**;
@@ -81,4 +81,9 @@ Para ativar o engine móvel de 512 MiB, depois de subir este projeto ao GitHub:
 5. a Vercel fará um novo deploy se a integração Git estiver ativa.
 
 Após o deploy, abra `/wasm-mobile/manifest.json`. Ele deve mostrar
-`"ready": true` e `"maximumMemoryMiB": 512`.
+`"ready": true` e `"maximumMemoryMiB": 384`.
+
+
+## v0.5.10 · Heavy mobile
+
+Para SVS >=250 MB em tablet/mobile, o fallback stock é bloqueado. Rode o workflow **Build Mobile OpenSlide WASM** e confirme os três arquivos em `public/wasm-mobile/` antes do deploy: `manifest.json`, `openslide.js` e `openslide.wasm`.

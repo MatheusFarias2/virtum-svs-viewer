@@ -1,12 +1,12 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title Teste de build - Virtum SVS Viewer v0.5.9
+title Teste de build - Virtum SVS Viewer v0.5.10
 
 echo Limpando build anterior...
 if exist dist rmdir /s /q dist
 
-echo Testando Heavy Slide Engine + Smart Cache + Predictive Navigation + Instant Open + Mobile Viewer 2.0 + Benchmark & Diagnostics...
+echo Testando Heavy Slide Engine + Smart Cache + Predictive Navigation + Instant Open + Mobile Viewer 2.0 + Benchmark & Diagnostics + Mobile Heavy Open Rescue...
 call npm run test:runtime
 if errorlevel 1 (
   echo.

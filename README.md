@@ -1,4 +1,30 @@
-# Virtum SVS Viewer v0.5.9 · Benchmark & Diagnostics
+# Virtum SVS Viewer v0.5.10 · Mobile Heavy Open Rescue
+
+A v0.5.10 ataca o gargalo anterior ao primeiro tile em tablets. Para SVS >=250 MB, o Viewer reinicia o runtime OpenSlide, exige o Mobile WASM, usa um envelope de I/O/memória mínimo e registra a trilha completa da abertura.
+
+## Mobile Heavy Open Rescue
+
+- ativo somente em mobile/tablet (ou Memory Safe) com SVS >=250 MB;
+- bloqueia o fallback stock quando o Mobile WASM não está instalado;
+- reinicia o OpenSlide antes da lâmina pesada para limpar heap/workers/caches anteriores;
+- perfil Heavy: 1 worker, bloco 1 MiB, broker 12 MiB, 1 leitura, read-ahead 0;
+- perfil Ultra (>=600 MB): broker 8 MiB;
+- fila de tiles 1, Smart Cache 8–10 tiles, preload off e Predictive Navigation off;
+- trilha de abertura: arquivo → Mobile WASM → fetch WASM → initialize → openslide.open → DZI → primeiro tile → primeiro pixel;
+- o diagnóstico mostra o estágio exato da falha;
+- build Mobile WASM recomendado: 16 MiB inicial, 384 MiB máximo, growth 5%, cap 8 MiB.
+
+### Importante antes de testar no tablet
+
+Execute uma vez o workflow **Build Mobile OpenSlide WASM** no GitHub. Ele precisa gerar em `public/wasm-mobile/`:
+
+```text
+manifest.json
+openslide.js
+openslide.wasm
+```
+
+Sem esses três arquivos, a v0.5.10 **recusa deliberadamente** abrir SVS >=250 MB no mobile, em vez de cair silenciosamente no runtime stock.
 
 A v0.5.9 adiciona telemetria local de sessão para medir First Pixel, FPS, frame p95, latência de tile/decode, cache, pressão e estabilidade. O objetivo é comparar dispositivos e lâminas com números reproduzíveis sem alterar o pipeline estável da v0.5.8.
 
@@ -217,6 +243,9 @@ npm run test:backpressure
 npm run test:cache
 npm run test:predictive
 npm run test:instant
+npm run test:mobile
+npm run test:benchmark
+npm run test:rescue
 ```
 
 Para testar runtime + build de produção no Windows:
@@ -248,7 +277,7 @@ O arquivo `.SVS` continua sendo processado localmente no navegador. O projeto n�
 
 ## Release
 
-**Virtum SVS Viewer v0.5.8 · Mobile Viewer 2.0** continua a sequência:
+**Virtum SVS Viewer v0.5.10 · Mobile Heavy Open Rescue** continua a sequência:
 
 - `v0.5.4.0` · Heavy Slide Safety
 - `v0.5.4.1` · Pyramid First
@@ -263,3 +292,4 @@ As quatro fases permanecem identificáveis internamente, mas passam a ser distri
 - `v0.5.8` · Mobile Viewer 2.0
 
 - `v0.5.9` · Benchmark & Diagnostics
+- `v0.5.10` · Mobile Heavy Open Rescue

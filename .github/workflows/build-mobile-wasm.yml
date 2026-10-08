@@ -57,8 +57,8 @@ jobs:
           cat > public/wasm-mobile/manifest.json <<EOF
           {
             "ready": true,
-            "variant": "virtum-mobile-512",
-            "maximumMemoryMiB": 512,
+            "variant": "virtum-mobile-rescue-384",
+            "maximumMemoryMiB": 384,
             "initialMemoryMiB": 16,
             "js": "/wasm-mobile/openslide.js",
             "wasm": "/wasm-mobile/openslide.wasm",
@@ -75,8 +75,8 @@ jobs:
 
           Build modification: \`mobile-wasm/patch-build.py\`
 
-          Memory profile: initial 16 MiB, maximum 512 MiB, 10% geometric growth,
-          16 MiB growth cap. All other upstream build flags remain unchanged.
+          Memory profile: initial 16 MiB, maximum 384 MiB, 5% geometric growth,
+          8 MiB growth cap. All other upstream build flags remain unchanged.
           EOF
           if [ -f .mobile-wasm-src/LICENSE ]; then cp .mobile-wasm-src/LICENSE public/wasm-mobile/LICENSE; fi
           if [ -f .mobile-wasm-src/NOTICE ]; then cp .mobile-wasm-src/NOTICE public/wasm-mobile/NOTICE; fi
@@ -88,7 +88,7 @@ jobs:
           test -s public/wasm-mobile/openslide.js
           test -s public/wasm-mobile/openslide.wasm
           test -s public/wasm-mobile/manifest.json
-          grep -q '"maximumMemoryMiB": 512' public/wasm-mobile/manifest.json
+          grep -q '"maximumMemoryMiB": 384' public/wasm-mobile/manifest.json
           echo "Generated files:"
           ls -lh public/wasm-mobile
 
@@ -103,5 +103,5 @@ jobs:
             echo "No changes to commit."
             exit 0
           fi
-          git commit -m "build: add OpenSlide mobile WASM 512 MiB"
+          git commit -m "build: add OpenSlide mobile Rescue WASM 384 MiB"
           git push

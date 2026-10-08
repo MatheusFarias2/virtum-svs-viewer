@@ -1,14 +1,15 @@
 # OpenSlide WASM Mobile · Virtum
 
-O Virtum v0.5.3.1 consegue usar um build específico do `openslide-js` em tablets.
+O Virtum v0.5.10 consegue usar um build específico do `openslide-js` em tablets.
 O código do visualizador procura primeiro por:
 
 - `/wasm-mobile/manifest.json`
 - `/wasm-mobile/openslide.js`
 - `/wasm-mobile/openslide.wasm`
 
-Se esses arquivos não existirem, o Viewer usa automaticamente o WASM padrão do
-pacote NPM. Portanto o projeto continua funcionando antes do build móvel.
+Se esses arquivos não existirem, desktop e lâminas leves ainda podem usar o WASM padrão.
+**Em tablet/mobile com SVS >=250 MB, a v0.5.10 bloqueia esse fallback** para evitar
+que o runtime stock de teto muito maior derrube o processo antes do primeiro tile.
 
 ## O que muda no build móvel
 
@@ -17,10 +18,10 @@ WASM com parâmetros de memória mais conservadores:
 
 ```text
 INITIAL_MEMORY = 16 MiB
-MAXIMUM_MEMORY = 512 MiB
+MAXIMUM_MEMORY = 384 MiB
 ALLOW_MEMORY_GROWTH = on
-MEMORY_GROWTH_GEOMETRIC_STEP = 10%
-MEMORY_GROWTH_GEOMETRIC_CAP = 16 MiB
+MEMORY_GROWTH_GEOMETRIC_STEP = 5%
+MEMORY_GROWTH_GEOMETRIC_CAP = 8 MiB
 USE_PTHREADS = 1 (mantido do upstream)
 ```
 

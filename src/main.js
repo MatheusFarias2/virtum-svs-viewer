@@ -7,6 +7,7 @@ import { SmartCacheEngine } from './smart-cache-engine.js';
 import { PredictiveNavigation } from './predictive-navigation.js';
 import { InstantOpenEngine } from './instant-open.js';
 import { BenchmarkDiagnosticsEngine } from './benchmark-diagnostics.js';
+import { MobileHeavyOpenRescue } from './mobile-heavy-open-rescue.js';
 import { MobileGestureGuard, shouldAutoHideMobileChrome } from './mobile-viewer-2.js';
 
 const $ = (id) => document.getElementById(id);
@@ -117,6 +118,7 @@ const ui = {
   diagWorkers: $('diagWorkers'),
   rerunBenchmarkBtn: $('rerunBenchmarkBtn'),
   diagMemoryMode: $('diagMemoryMode'),
+  diagRescue: $('diagRescue'),
   diagSessionScore: $('diagSessionScore'),
   diagFirstPixel: $('diagFirstPixel'),
   diagInteractive: $('diagInteractive'),
@@ -142,6 +144,7 @@ const ui = {
   startupDiagCache: $('startupDiagCache'),
   startupDiagMemory: $('startupDiagMemory'),
   startupDiagEngine: $('startupDiagEngine'),
+  startupDiagRescue: $('startupDiagRescue'),
   startupDiagCompat: $('startupDiagCompat'),
   startupDiagPhase: $('startupDiagPhase'),
   startupDiagError: $('startupDiagError'),
@@ -270,6 +273,7 @@ const BACKPRESSURE_HEARTBEAT_MS = 750;
 const PREDICTIVE_QUIET_MS = 150;
 const INSTANT_OPEN_FALLBACK_PREVIEW_MS = 900;
 const INSTANT_OPEN_IDLE_TIMEOUT_MS = 1200;
+const MOBILE_RESCUE_MAX_WASM_MIB = 512;
 const PREFS_KEY = 'virtum-svs-viewer-prefs-v035';
 const AUTOSAVE_INDEX_KEY = 'virtum-svs-viewer-autosave-index-v036';
 const AUTOSAVE_PREFIX = 'virtum-svs-viewer-autosave-v036:';
@@ -310,7 +314,7 @@ const LOW_POWER_CONFIG = {
 
 const WASM_UPSTREAM_INITIAL_PAGES = 256; // 16 MiB
 const WASM_UPSTREAM_MAX_PAGES = 32768;   // 2 GiB
-const WASM_REDUCED_MAX_PAGES = 8192;     // 512 MiB · apenas diagnóstico
+const WASM_REDUCED_MAX_PAGES = 6144;     // 384 MiB · perfil Rescue / diagnóstico
 
 const PERFORMANCE_PROFILES = {
   auto: { label: 'Automático', jobLimit: 6, preload: false, tileCacheCount: 160 },
@@ -385,6 +389,7 @@ const state = {
   benchmarkPromise: null,
   engineWorkerCount: null,
   engineBrokerCacheBytes: null,
+  engineRescueActive: false,
   runtimeThrottle: 1,
   memorySafeMode: false,
   memorySafeUserSet: false,
@@ -598,6 +603,12 @@ const benchmarkDiagnostics = new BenchmarkDiagnosticsEngine({
   sampleLimit: 260,
   frameLimit: 420,
   onChange: () => scheduleDiagnosticsUpdate(180),
+});
+
+const mobileHeavyOpenRescue = new MobileHeavyOpenRescue({
+  thresholdBytes: HEAVY_SLIDE_THRESHOLD_BYTES,
+  ultraThresholdBytes: ULTRA_HEAVY_SLIDE_THRESHOLD_BYTES,
+  onChange: () => scheduleDiagnosticsUpdate(120),
 });
 
 function benchmarkFrameLoop(timestamp) {
@@ -2180,6 +2191,47 @@ async function runDeviceBenchmark(force = false) {
   return state.benchmarkPromise;
 }
 
+function isMobileHeavyRescueCandidate(bytes = state.pendingSlideBytes || state.currentFile?.size || 0) {
+  return mobileHeavyOpenRescue.isCandidate({
+    fileSize: bytes,
+    mobile: detectMobileDevice(),
+    memorySafe: state.memorySafeMode,
+  });
+}
+
+function rescueProfile() {
+  return mobileHeavyOpenRescue.snapshot.active ? mobileHeavyOpenRescue.snapshot.profile : null;
+}
+
+function markRescueStage(stage, detail = '') {
+  const entry = mobileHeavyOpenRescue.mark(stage, detail);
+  if (entry) scheduleDiagnosticsUpdate(0);
+  return entry;
+}
+
+async function restartEngineForMobileHeavyRescue(file) {
+  if (!mobileHeavyOpenRescue.snapshot.active || !state.openslide) return false;
+  markRescueStage('engine-reset-begin', state.wasmVariant || 'engine ativo');
+  await closeCurrentSlide();
+  try { state.openslide?.terminate?.(); } catch (_) {}
+  state.openslide = null;
+  state.ready = false;
+  state.initPromise = null;
+  state.engineMode = 'standby';
+  state.engineWorkerCount = null;
+  state.engineBrokerCacheBytes = null;
+  state.engineRescueActive = false;
+  state.wasmVariant = 'stock';
+  state.currentFile = file;
+  state.pendingSlideBytes = file?.size || 0;
+  state.progressiveMode = slideStartupMode(file?.size || 0);
+  // Dá ao navegador uma oportunidade de liberar workers/buffers do runtime anterior
+  // antes de alocar o heap compartilhado do Rescue Engine.
+  await new Promise(resolve => window.setTimeout(resolve, 40));
+  markRescueStage('engine-reset-end', 'runtime anterior encerrado');
+  return true;
+}
+
 function slideStartupMode(bytes = state.pendingSlideBytes || state.currentFile?.size || 0) {
   if (!Number.isFinite(bytes) || bytes <= 0) return 'standard';
   if (bytes >= ULTRA_HEAVY_SLIDE_THRESHOLD_BYTES) return 'ultra-heavy';
@@ -2205,6 +2257,15 @@ function isHeavyConstrainedStartup(mode = slideStartupMode()) {
 
 function tuneEngineForSlide(settings) {
   const tuned = { ...settings };
+  const rescue = rescueProfile();
+  if (rescue) {
+    tuned.workerCount = rescue.workerCount;
+    tuned.blockSize = rescue.blockSize;
+    tuned.brokerCacheBytes = rescue.brokerCacheBytes;
+    tuned.maxConcurrentReads = rescue.maxConcurrentReads;
+    tuned.readAhead = rescue.readAhead;
+    return tuned;
+  }
   const mode = slideStartupMode();
   if (mode === 'standard') return tuned;
 
@@ -2266,15 +2327,16 @@ function activateHeavyStartupThrottle(mode = slideStartupMode()) {
   state.heavyStartupCacheCount = null;
   if (!constrained) return;
 
-  // Heavy mantém duas solicitações no máximo para que o broker possa preparar
-  // a próxima leitura sem formar uma fila longa no decoder. Ultra Heavy usa uma só.
-  const jobLimit = mode === 'ultra-heavy' ? 1 : 2;
-  const cacheCount = mode === 'ultra-heavy' ? 12 : 20;
+  // Rescue força o envelope mínimo. Fora dele, preservamos a política Heavy Safe.
+  const rescue = rescueProfile();
+  const jobLimit = rescue?.jobLimit || (mode === 'ultra-heavy' ? 1 : 2);
+  const cacheCount = rescue?.tileCacheCount || (mode === 'ultra-heavy' ? 12 : 20);
+  const cacheFloor = rescue?.tileCacheFloor || (mode === 'ultra-heavy' ? 8 : 12);
   state.heavyStartupJobLimit = jobLimit;
   state.heavyStartupCacheCount = cacheCount;
   if (viewer.imageLoader) viewer.imageLoader.jobLimit = jobLimit;
   applyTileCacheLimit(viewer, cacheCount);
-  smartCacheEngine.setBudget({ targetCount: cacheCount, floorCount: mode === 'ultra-heavy' ? 8 : 12, pressureLevel: adaptiveBackpressure?.snapshot?.level || 0 });
+  smartCacheEngine.setBudget({ targetCount: cacheCount, floorCount: cacheFloor, pressureLevel: adaptiveBackpressure?.snapshot?.level || 0 });
   smartTileScheduler.syncPolicy();
   setStartupPhase(`${startupModeLabel(mode)} · priorizando primeira imagem · fila ${jobLimit} · scheduler centro-primeiro`);
 }
@@ -2414,6 +2476,7 @@ function markInstantFirstPixel(source = 'tile') {
   state.firstPixelMs = instantOpenEngine.snapshot.firstPixelMs;
   state.firstViewMs = state.firstPixelMs;
   state.firstPixelSource = source;
+  if (mobileHeavyOpenRescue.snapshot.active) mobileHeavyOpenRescue.complete(`${source} · ${Math.round(state.firstPixelMs || 0)} ms`);
   setBusy(false);
   const seconds = state.firstPixelMs != null ? `${(state.firstPixelMs / 1000).toFixed(1)} s` : 'agora';
   flashInstantOpenBadge(`Primeira imagem em ${seconds} · refinando detalhes…`, 1800);
@@ -2552,9 +2615,9 @@ function setStartupPhase(phase, error = '') {
 
 function wasmProbeText(result = state.wasmMemoryProbe) {
   if (!result) return 'não executado';
-  if (result.upstreamOk) return '2 GiB: OK · 512 MiB: OK';
-  if (result.reducedOk) return `2 GiB: FALHOU · 512 MiB: OK (${result.upstreamError || 'limite do navegador'})`;
-  return `2 GiB: FALHOU · 512 MiB: FALHOU (${result.reducedError || result.upstreamError || 'sem memória compartilhada'})`;
+  if (result.upstreamOk) return '2 GiB: OK · 384 MiB: OK';
+  if (result.reducedOk) return `2 GiB: FALHOU · 384 MiB: OK (${result.upstreamError || 'limite do navegador'})`;
+  return `2 GiB: FALHOU · 384 MiB: FALHOU (${result.reducedError || result.upstreamError || 'sem memória compartilhada'})`;
 }
 
 async function runWasmMemoryProbe({ notify = true } = {}) {
@@ -2595,20 +2658,20 @@ async function runWasmMemoryProbe({ notify = true } = {}) {
     }
   };
 
-  // Primeiro tenta 512 MiB. Se isso já falhar, não arriscamos pedir o teto de 2 GiB.
+  // Primeiro tenta 384 MiB (perfil Rescue). Se isso falhar, não arriscamos pedir o teto de 2 GiB.
   tryMemory(WASM_REDUCED_MAX_PAGES, 'reducedOk', 'reducedError');
   await new Promise((resolve) => window.setTimeout(resolve, 0));
   if (result.reducedOk) {
     tryMemory(WASM_UPSTREAM_MAX_PAGES, 'upstreamOk', 'upstreamError');
   } else {
-    result.upstreamError = 'não testado: o limite de 512 MiB já falhou';
+    result.upstreamError = 'não testado: o limite de 384 MiB já falhou';
   }
 
   state.wasmMemoryProbe = result;
   setStartupPhase('Teste WASM concluído');
   if (notify) {
     if (result.upstreamOk) showToast('Memória WASM de 2 GiB aceita pelo navegador', 'success');
-    else if (result.reducedOk) showToast('2 GiB falhou; 512 MiB foi aceito', 'info');
+    else if (result.reducedOk) showToast('2 GiB falhou; 384 MiB foi aceito', 'info');
     else showToast('O navegador rejeitou a memória WASM compartilhada', 'error');
   }
   return result;
@@ -2618,7 +2681,7 @@ function startupDiagnosticText() {
   const engine = engineSettingsForCurrentMode();
   const benchmark = state.deviceBenchmark;
   return [
-    'Virtum SVS Viewer v0.5.9 · Benchmark & Diagnostics',
+    'Virtum SVS Viewer v0.5.10 · Mobile Heavy Open Rescue',
     `Data: ${new Date().toLocaleString('pt-BR')}`,
     `UA: ${navigator.userAgent || '—'}`,
     `Móvel/tablet: ${detectMobileDevice()}`,
@@ -2633,6 +2696,8 @@ function startupDiagnosticText() {
     `Benchmark: ${benchmark ? `${benchmark.cpuMs.toFixed(1)} ms · score ${benchmark.score.toFixed(1)} · ${benchmark.tier}` : 'não executado'}`,
     `Modo seguro: ${state.memorySafeMode}`,
     `Engine WASM: ${state.mobileWasmStatus} (${state.wasmVariant})`,
+    `Mobile Heavy Rescue: ${mobileHeavyOpenRescue.snapshot.active ? `${mobileHeavyOpenRescue.snapshot.stage} · ${mobileHeavyOpenRescue.snapshot.lastDetail || 'ativo'}` : 'standby'}`,
+    `Rescue trace: ${mobileHeavyOpenRescue.snapshot.trace.map(item => `${item.stage}@${item.atMs}ms`).join(' → ') || '—'}`,
     `Workers: ${engine.workerCount}`,
     `Block size: ${Math.round((engine.blockSize || 1024 * 1024) / 1024)} KiB`,
     `Broker cache: ${Math.round(engine.brokerCacheBytes / (1024 * 1024))} MiB`,
@@ -2700,37 +2765,53 @@ async function resolveOpenSlideWasmAssets() {
   };
 
   const wantsMobile = detectMobileDevice() || state.memorySafeMode;
-  if (!wantsMobile) {
+  const rescueRequired = mobileHeavyOpenRescue.snapshot.active;
+  if (!wantsMobile && !rescueRequired) {
     state.wasmVariant = 'stock';
     state.mobileWasmStatus = 'desktop · engine padrão';
     return stock;
   }
 
   try {
-    state.mobileWasmStatus = 'verificando Mobile WASM…';
+    state.mobileWasmStatus = rescueRequired ? 'Rescue · verificando Mobile WASM…' : 'verificando Mobile WASM…';
+    if (rescueRequired) markRescueStage('mobile-wasm-check', 'manifest + binário');
     updateStartupDiagnostics();
     const manifestUrl = new URL(MOBILE_WASM_MANIFEST_URL, window.location.origin);
-    manifestUrl.searchParams.set('v', '053');
+    manifestUrl.searchParams.set('v', '0510');
     const response = await fetch(manifestUrl, { cache: 'no-store' });
     if (!response.ok) throw new Error(`manifest HTTP ${response.status}`);
     const manifest = await response.json();
     if (!manifest?.ready || !manifest?.js || !manifest?.wasm) throw new Error('manifest incompleto');
+    if (rescueRequired && !mobileHeavyOpenRescue.acceptsMobileManifest(manifest)) {
+      throw new Error(`manifest incompatível com Rescue (MAX=${manifest?.maximumMemoryMiB || '?'} MiB; limite ${MOBILE_RESCUE_MAX_WASM_MIB} MiB)`);
+    }
 
     const jsUrl = new URL(manifest.js, window.location.origin).href;
     const wasmUrl = new URL(manifest.wasm, window.location.origin);
     const probe = await fetch(wasmUrl, { method: 'HEAD', cache: 'no-store' });
     if (!probe.ok) throw new Error(`WASM HTTP ${probe.status}`);
 
-    state.wasmVariant = 'mobile-512';
+    const maxMiB = Number(manifest.maximumMemoryMiB || 384);
+    state.wasmVariant = `mobile-${maxMiB}`;
     state.mobileWasmManifest = manifest;
-    state.mobileWasmStatus = `Mobile WASM ${manifest.maximumMemoryMiB || 512} MiB · ativo`;
+    state.mobileWasmStatus = `${rescueRequired ? 'Rescue · ' : ''}Mobile WASM ${maxMiB} MiB · ativo`;
+    if (rescueRequired) markRescueStage('mobile-wasm-ready', `${maxMiB} MiB · ${manifest.variant || 'custom'}`);
     return {
-      variant: 'mobile-512',
+      variant: state.wasmVariant,
       label: state.mobileWasmStatus,
       wasmJsUrl: jsUrl,
       wasmBinaryUrl: wasmUrl,
     };
   } catch (error) {
+    if (rescueRequired) {
+      state.wasmVariant = 'mobile-required-missing';
+      state.mobileWasmStatus = 'Rescue bloqueado · Mobile WASM ausente';
+      mobileHeavyOpenRescue.fail('mobile-wasm', error);
+      const failure = new Error(`Mobile Heavy Open Rescue exige /wasm-mobile/openslide.js + openslide.wasm + manifest.json. Fallback stock de 2 GiB foi bloqueado para proteger o tablet. ${error?.message || error}`);
+      failure.code = 'VIRTUM_MOBILE_WASM_REQUIRED';
+      console.error('Rescue não usará stock WASM:', error);
+      throw failure;
+    }
     state.wasmVariant = 'stock-fallback';
     state.mobileWasmStatus = 'Mobile WASM ausente · fallback padrão';
     console.warn('Mobile WASM ainda não disponível; usando build padrão:', error);
@@ -2757,21 +2838,26 @@ async function initializeAttempt({ ioEnabled, label }) {
 
   let wasmBinary;
   try {
+    if (mobileHeavyOpenRescue.snapshot.active) markRescueStage('wasm-fetch-begin', state.wasmVariant);
     setStartupPhase(`Baixando OpenSlide WASM · ${state.wasmVariant}`);
     const response = await fetch(wasmBinaryUrl);
     if (!response.ok) {
       throw new Error(`WASM HTTP ${response.status}: ${response.statusText || 'falha ao carregar'}`);
     }
     wasmBinary = await response.arrayBuffer();
+    if (mobileHeavyOpenRescue.snapshot.active) markRescueStage('wasm-fetch-end', `${Math.round(wasmBinary.byteLength / 1024)} KiB`);
     setStartupPhase('WASM carregado · preparando worker');
   } catch (error) {
+    if (mobileHeavyOpenRescue.snapshot.active) mobileHeavyOpenRescue.fail('wasm-fetch', error);
     throw new Error(`Não foi possível carregar o OpenSlide WASM: ${error?.message || error}`);
   }
 
   const engineSettings = engineSettingsForCurrentMode();
   state.engineWorkerCount = engineSettings.workerCount;
   state.engineBrokerCacheBytes = engineSettings.brokerCacheBytes;
+  state.engineRescueActive = mobileHeavyOpenRescue.snapshot.active;
 
+  if (mobileHeavyOpenRescue.snapshot.active) markRescueStage('openslide-initialize-begin', `${engineSettings.workerCount} worker · broker ${Math.round(engineSettings.brokerCacheBytes / (1024 * 1024))} MiB`);
   setStartupPhase(`Inicializando OpenSlide · ${label}`);
   const initializePromise = OpenSlide.initialize({
     workerCount: engineSettings.workerCount,
@@ -2798,8 +2884,10 @@ async function initializeAttempt({ ioEnabled, label }) {
   try {
     const openslide = await Promise.race([initializePromise, timeoutPromise]);
     window.clearTimeout(timeoutId);
+    if (mobileHeavyOpenRescue.snapshot.active) markRescueStage('openslide-initialize-end', label);
     return openslide;
   } catch (error) {
+    if (mobileHeavyOpenRescue.snapshot.active) mobileHeavyOpenRescue.fail('openslide.initialize', error);
     window.clearTimeout(timeoutId);
     for (const worker of workers) {
       try { worker.terminate(); } catch (_) {}
@@ -2850,7 +2938,7 @@ function diagnosticSummary() {
 }
 
 async function ensureOpenSlide() {
-  if (state.ready && state.openslide) return state.openslide;
+  if (state.ready && state.openslide && (!mobileHeavyOpenRescue.snapshot.active || state.engineRescueActive)) return state.openslide;
   if (state.initPromise) return state.initPromise;
 
   if (!state.deviceBenchmark) {
@@ -3036,17 +3124,27 @@ async function openSvs(file) {
   resetProgressivePreview();
   state.currentFile = file;
   state.lastEngineError = '';
-  setStartupPhase('Arquivo .SVS recebido · Instant Open');
+  const rescueActive = mobileHeavyOpenRescue.begin({
+    fileName: file.name,
+    fileSize: file.size || 0,
+    mobile: detectMobileDevice(),
+    memorySafe: state.memorySafeMode,
+  });
+  setStartupPhase(rescueActive ? 'Arquivo .SVS recebido · Mobile Heavy Open Rescue' : 'Arquivo .SVS recebido · Instant Open');
   restoreEmptyStateText();
 
   try {
+    if (rescueActive && state.openslide) {
+      setBusy(true, 'Mobile Heavy Open Rescue', 'Encerrando runtime anterior para liberar heap, workers e caches…');
+      await restartEngineForMobileHeavyRescue(file);
+    }
     if (!state.ready || !state.openslide) {
-      setBusy(true, 'Preparando o microscópio', 'Inicializando o motor local uma única vez…');
-      setStartupPhase('Preparando motor OpenSlide');
+      setBusy(true, rescueActive ? 'Mobile Heavy Open Rescue' : 'Preparando o microscópio', rescueActive ? 'Inicializando engine móvel de memória limitada…' : 'Inicializando o motor local uma única vez…');
+      setStartupPhase(rescueActive ? 'Rescue · preparando Mobile WASM' : 'Preparando motor OpenSlide');
       await ensureOpenSlide();
     }
 
-    setBusy(true, `Instant Open · ${startupModeLabel(state.progressiveMode)}`, `${file.name} · ${formatBytes(file.size)} · lendo cabeçalho…`);
+    setBusy(true, rescueActive ? `Rescue · ${startupModeLabel(state.progressiveMode)}` : `Instant Open · ${startupModeLabel(state.progressiveMode)}`, `${file.name} · ${formatBytes(file.size)} · lendo cabeçalho…`);
     setStatus('Instant Open · lendo cabeçalho da lâmina…');
     setStartupPhase('Instant Open · abrindo cabeçalho');
 
@@ -3068,7 +3166,15 @@ async function openSvs(file) {
     instantOpenEngine.begin({ mode: state.progressiveMode, fileSize: file.size || 0 });
     benchmarkDiagnostics.resetSession({ fileName: file.name, fileSize: file.size || 0, mode: state.progressiveMode });
 
-    const slide = await state.openslide.open(file);
+    if (rescueActive) markRescueStage('openslide-open-begin', `${file.name} · ${formatBytes(file.size)}`);
+    let slide;
+    try {
+      slide = await state.openslide.open(file);
+    } catch (error) {
+      if (rescueActive) mobileHeavyOpenRescue.fail('openslide.open', error);
+      throw error;
+    }
+    if (rescueActive) markRescueStage('openslide-open-end', 'handle SVS pronto');
     instantOpenEngine.markHeader();
     state.headerOpenMs = instantOpenEngine.snapshot.headerMs;
     state.slides.push(slide);
@@ -3076,6 +3182,7 @@ async function openSvs(file) {
     setStartupPhase('Instant Open · montando pirâmide mínima');
     const mobileTileSize = (detectMobileDevice() || state.memorySafeMode) ? MOBILE_DZI_TILE_SIZE : DESKTOP_DZI_TILE_SIZE;
     state.generators = [new DeepZoomGenerator(slide, { tileSize: mobileTileSize, overlap: 1 })];
+    if (rescueActive) markRescueStage('dzi-created', `tile ${mobileTileSize}px · ${state.generators[0].levelCount} níveis`);
     instantOpenEngine.markPyramid();
     smartCacheEngine.reset({ maxLevel: state.generators[0].levelCount - 1, tileSize: mobileTileSize });
 
@@ -3101,7 +3208,8 @@ async function openSvs(file) {
         state.tileRequested += 1;
         if (!state.firstTileRequestedAt) {
           state.firstTileRequestedAt = startedAt || performance.now();
-          setStartupPhase('Instant Open · primeiro tile lendo/decodificando…');
+          if (rescueActive) markRescueStage('first-tile-request', `L${level} · ${x},${y}`);
+          setStartupPhase(rescueActive ? 'Rescue · primeiro tile lendo/decodificando…' : 'Instant Open · primeiro tile lendo/decodificando…');
         }
         state.tileLevelCounts[level] = state.tileLevelCounts[level] || 0;
         scheduleDiagnosticsUpdate();
@@ -3158,6 +3266,7 @@ async function openSvs(file) {
     armFirstTileTimeout();
     scheduleFallbackPreview(state.generators[0], file);
   } catch (error) {
+    if (rescueActive && !mobileHeavyOpenRescue.snapshot.failed) mobileHeavyOpenRescue.fail(mobileHeavyOpenRescue.snapshot.stage || 'open', error);
     state.lastEngineError = String(error?.message || error || 'Falha ao abrir SVS');
     setStartupPhase('Falha ao abrir lâmina', state.lastEngineError);
     console.error('Falha ao abrir a lâmina:', error);
@@ -3259,7 +3368,7 @@ function smartTileSchedulerPolicy() {
   const pressure = adaptiveBackpressure?.snapshot || {
     level: 0, concurrencyScale: 1, maxTilesPerFrameCap: 99, allowPreload: true,
   };
-  const minimumJobs = state.memorySafeMode || pressure.level >= 2 ? 1 : 2;
+  const minimumJobs = mobileHeavyOpenRescue.snapshot.active || state.memorySafeMode || pressure.level >= 2 ? 1 : 2;
   const baseJobLimit = Math.max(minimumJobs, Math.round((cfg.jobLimit || 2) * (compareActive ? 0.68 : 1)));
   let idleJobLimit = Math.max(minimumJobs, Math.round(baseJobLimit * (state.runtimeThrottle || 1)));
 
@@ -3307,6 +3416,7 @@ function predictiveNavigationPolicy() {
   let enabled = true;
   let reason = '';
   if (!hasOpenSlide() || !state.tileLoaded) { enabled = false; reason = 'aguardando lâmina'; }
+  else if (mobileHeavyOpenRescue.snapshot.active) { enabled = false; reason = 'Mobile Heavy Rescue'; }
   else if (state.opening || state.awaitingFirstTile || state.heavyStartupActive) { enabled = false; reason = 'abertura protegida'; }
   else if (hasCompareSlide()) { enabled = false; reason = 'comparação ativa'; }
   else if (pressure.level > 0) { enabled = false; reason = 'backpressure'; }
@@ -3411,6 +3521,7 @@ function benchmarkReportPayload() {
       lowPower: benchmark?.lowPower ?? detectLowPowerDesktop(),
       dpr: window.devicePixelRatio || 1,
     },
+    rescue: mobileHeavyOpenRescue.snapshot,
   });
 }
 
@@ -3418,7 +3529,7 @@ function benchmarkTextReport() {
   const report = benchmarkReportPayload();
   const m = report.metrics;
   return [
-    'Virtum SVS Viewer v0.5.9 · Benchmark & Diagnostics',
+    'Virtum SVS Viewer v0.5.10 · Mobile Heavy Open Rescue',
     `Data: ${new Date(report.generatedAt).toLocaleString('pt-BR')}`,
     `Lâmina: ${m.fileName || '—'} · ${m.fileSize ? formatBytes(m.fileSize) : '—'} · ${m.mode}`,
     `Score da sessão: ${report.score.value}/100 · ${report.score.label}`,
@@ -3470,7 +3581,7 @@ async function copyBenchmarkReport() {
 
 function exportBenchmarkReport() {
   const payload = benchmarkReportPayload();
-  const filename = `${sanitizeBaseName(state.currentFile?.name || 'sessao')}_benchmark_v0.5.9.json`;
+  const filename = `${sanitizeBaseName(state.currentFile?.name || 'sessao')}_benchmark_v0.5.10.json`;
   downloadBlob(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' }), filename);
   showToast('Benchmark JSON exportado', 'success');
 }
@@ -3533,6 +3644,12 @@ function updateDiagnostics() {
     ui.diagMemoryMode.textContent = state.memorySafeMode
       ? `Seguro · ${memorySafeReason()}`
       : 'Normal';
+  }
+  if (ui.diagRescue) {
+    const rescue = mobileHeavyOpenRescue.snapshot;
+    ui.diagRescue.textContent = rescue.active
+      ? `${rescue.completed ? 'Concluído' : rescue.failed ? 'Falhou' : 'Ativo'} · ${rescue.stage}${rescue.lastDetail ? ` · ${rescue.lastDetail}` : ''}`
+      : 'Standby · ativa em mobile ≥250 MB';
   }
   if (ui.memorySafeToggle) ui.memorySafeToggle.checked = state.memorySafeMode;
   benchmarkDiagnostics.observeRuntime({
@@ -3622,6 +3739,12 @@ function updateStartupDiagnostics() {
     const tileSize = (mobile || state.memorySafeMode) ? MOBILE_DZI_TILE_SIZE : DESKTOP_DZI_TILE_SIZE;
     ui.startupDiagEngine.textContent = `${state.mobileWasmStatus} · tiles ${tileSize}px`;
   }
+  if (ui.startupDiagRescue) {
+    const rescue = mobileHeavyOpenRescue.snapshot;
+    ui.startupDiagRescue.textContent = rescue.active
+      ? `${rescue.stage}${rescue.lastDetail ? ` · ${rescue.lastDetail}` : ''} · trace ${rescue.trace.length}`
+      : 'Standby · mobile ≥250 MB';
+  }
   if (ui.startupDiagCompat) {
     ui.startupDiagCompat.textContent = compatibilityProblem || 'HTTPS / isolamento / WASM disponíveis';
   }
@@ -3635,7 +3758,12 @@ function updateStartupDiagnostics() {
   if (ui.startupSafeModeToggle) ui.startupSafeModeToggle.checked = state.memorySafeMode;
 
   if (ui.startupSafetyNotice) {
-    if (state.memorySafeMode) {
+    if (mobileHeavyOpenRescue.snapshot.active) {
+      ui.startupSafetyNotice.dataset.state = mobileHeavyOpenRescue.snapshot.failed ? 'warning' : 'safe';
+      ui.startupSafetyNotice.textContent = mobileHeavyOpenRescue.snapshot.failed
+        ? `Mobile Heavy Rescue parou em ${mobileHeavyOpenRescue.snapshot.errorStage || mobileHeavyOpenRescue.snapshot.stage}. ${mobileHeavyOpenRescue.snapshot.errorMessage || ''}`
+        : 'Mobile Heavy Open Rescue ativo: 1 worker, 1 leitura, read-ahead 0, broker 8–12 MiB, fila 1, cache mínimo e Predictive OFF.';
+    } else if (state.memorySafeMode) {
       ui.startupSafetyNotice.dataset.state = 'safe';
       ui.startupSafetyNotice.textContent = 'Proteção móvel otimizada. Em lâminas pesadas usa 1 worker, blocos de 1 MiB, cache controlado e sem preview manual concorrente antes do primeiro tile.';
     } else if (isLikelyConstrainedDevice()) {
@@ -3728,13 +3856,20 @@ function applyPerformanceProfile(silent = false) {
   state.runtimeThrottle = Math.max(0.65, runtimeThrottle);
 
   const pressure = adaptiveBackpressure?.snapshot || { level: 0, concurrencyScale: 1, cacheScale: 1, allowPreload: true };
-  const minimumJobs = state.memorySafeMode || pressure.level >= 2 ? 1 : 2;
+  const rescue = rescueProfile();
+  const minimumJobs = rescue ? 1 : (state.memorySafeMode || pressure.level >= 2 ? 1 : 2);
   const baseJobLimit = Math.max(minimumJobs, Math.round(cfg.jobLimit * (compareActive ? 0.68 : 1)));
-  const jobLimit = Math.max(minimumJobs, Math.round(baseJobLimit * state.runtimeThrottle * pressure.concurrencyScale));
+  let jobLimit = Math.max(minimumJobs, Math.round(baseJobLimit * state.runtimeThrottle * pressure.concurrencyScale));
   const constrainedCache = detectMobileDevice() || detectLowPowerDesktop();
-  const cacheFloor = state.memorySafeMode ? 8 : constrainedCache ? 16 : 48;
-  const cacheCount = Math.max(cacheFloor, Math.round(cfg.tileCacheCount * (compareActive ? 0.65 : 1) * pressure.cacheScale));
-  const preload = pressure.allowPreload && !state.memorySafeMode && !detectMobileDevice() && (cfg.preload || state.highDefinition) && !(compareActive && state.deviceBenchmark?.tier === 'lite');
+  let cacheFloor = rescue?.tileCacheFloor || (state.memorySafeMode ? 8 : constrainedCache ? 16 : 48);
+  let cacheCount = Math.max(cacheFloor, Math.round(cfg.tileCacheCount * (compareActive ? 0.65 : 1) * pressure.cacheScale));
+  let preload = pressure.allowPreload && !state.memorySafeMode && !detectMobileDevice() && (cfg.preload || state.highDefinition) && !(compareActive && state.deviceBenchmark?.tier === 'lite');
+  if (rescue) {
+    jobLimit = 1;
+    cacheCount = rescue.tileCacheCount;
+    cacheFloor = rescue.tileCacheFloor;
+    preload = false;
+  }
 
   if (viewer.imageLoader) viewer.imageLoader.jobLimit = jobLimit;
   if (compareViewer.imageLoader) compareViewer.imageLoader.jobLimit = jobLimit;

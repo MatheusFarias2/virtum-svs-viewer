@@ -36,7 +36,7 @@ if (existsSync(mobileManifest)) {
   }
   console.log('[Virtum deploy check] Mobile WASM detectado e incluído no dist.');
 } else {
-  console.log('[Virtum deploy check] Mobile WASM ainda não gerado; fallback padrão permanecerá ativo.');
+  console.log('[Virtum deploy check] Mobile WASM ainda não gerado; desktop/light mantém fallback, mas heavy mobile >=250 MB será bloqueado pelo Rescue.');
 }
 
 const totalFiles = assets.length + 1;
