@@ -1,6 +1,7 @@
-# Virtum SVS Viewer v0.5.10.1 · Mobile Heavy Open Rescue Hotfix
+# Virtum SVS Viewer v0.5.10.2 · First Pixel Compatibility Hotfix
 
-A v0.5.10.1 corrige um bloqueio da v0.5.10: SVS >=250 MB em tablets não são mais recusadas quando o Mobile WASM customizado não está publicado. O Viewer usa o WASM stock em Rescue controlado, com 1 worker, I/O local primeiro, cache mínimo e telemetria completa.
+A v0.5.10.2 corrige o loop de Instant Open observado em TVs/WebGL: a imagem podia já estar visível enquanto o app aguardava indefinidamente `tile-drawn`. Agora o primeiro pixel também é confirmado por `update-viewport`, com watchdog de compatibilidade.
+
 
 ## Mobile Heavy Open Rescue
 
@@ -277,7 +278,7 @@ O arquivo `.SVS` continua sendo processado localmente no navegador. O projeto n�
 
 ## Release
 
-**Virtum SVS Viewer v0.5.10.1 · Mobile Heavy Open Rescue Hotfix** continua a sequência:
+**Virtum SVS Viewer v0.5.10.2 · First Pixel Compatibility Hotfix** continua a sequência:
 
 - `v0.5.4.0` · Heavy Slide Safety
 - `v0.5.4.1` · Pyramid First

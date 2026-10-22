@@ -6,6 +6,7 @@ import { AdaptiveBackpressure } from './adaptive-backpressure.js';
 import { SmartCacheEngine } from './smart-cache-engine.js';
 import { PredictiveNavigation } from './predictive-navigation.js';
 import { InstantOpenEngine } from './instant-open.js';
+import { FirstPixelCompatGate } from './first-pixel-compat.js';
 import { BenchmarkDiagnosticsEngine } from './benchmark-diagnostics.js';
 import { MobileHeavyOpenRescue } from './mobile-heavy-open-rescue.js';
 import { MobileGestureGuard, shouldAutoHideMobileChrome } from './mobile-viewer-2.js';
@@ -597,6 +598,19 @@ predictiveNavigation = new PredictiveNavigation(viewer, {
 
 const instantOpenEngine = new InstantOpenEngine({
   onChange: () => scheduleDiagnosticsUpdate(),
+});
+
+const firstPixelCompat = new FirstPixelCompatGate({
+  watchdogMs: 1600,
+  canWatchdogConfirm: () => Boolean(
+    state.tileLoaded
+    && state.currentFile
+    && hasOpenSlide()
+    && ui.viewer.clientWidth > 0
+    && ui.viewer.clientHeight > 0
+    && getViewerCanvases().length > 0
+  ),
+  onConfirm: ({ source }) => completeFirstVisiblePixel(source),
 });
 
 const benchmarkDiagnostics = new BenchmarkDiagnosticsEngine({
@@ -1685,6 +1699,7 @@ async function closeCurrentSlide() {
   setInstantOpenBadge(false);
   resetProgressivePreview();
   instantOpenEngine.reset();
+  firstPixelCompat.reset();
   state.firstTileLoadedMs = null;
   state.firstPixelMs = null;
   state.firstPixelSource = '';
@@ -2469,6 +2484,27 @@ function scheduleDeferredOpenTasks() {
   });
 }
 
+function completeFirstVisiblePixel(source = 'tile-drawn') {
+  if (state.firstPixelReached) return false;
+  state.firstTileDrawn = true;
+  releaseHeavyStartupThrottle('first-view');
+  const hadPreview = state.progressivePreviewReady;
+  const previewTiming = state.progressivePreviewMs;
+  markInstantFirstPixel(source);
+  if (hadPreview) resetProgressivePreview();
+  redrawOverlays();
+
+  const firstPixel = state.firstPixelMs != null ? ` · primeiro pixel ${(state.firstPixelMs / 1000).toFixed(1)} s` : '';
+  const tileTiming = state.firstTileTotalMs != null ? ` · tile ${Math.round(state.firstTileTotalMs)} ms` : '';
+  const previewPart = hadPreview && previewTiming != null ? ` · preview ${(previewTiming / 1000).toFixed(1)} s` : '';
+  setStartupPhase(`Imagem visível${firstPixel}${previewPart}${tileTiming} · ${source} · finalizando dados secundários`);
+  if (state.currentFile) {
+    setStatus(`${state.currentFile.name} · imagem visível${firstPixel} · refinando resolução…`);
+  }
+  scheduleDeferredOpenTasks();
+  return true;
+}
+
 function markInstantFirstPixel(source = 'tile') {
   if (state.firstPixelReached) return false;
   state.firstPixelReached = true;
@@ -2681,7 +2717,7 @@ function startupDiagnosticText() {
   const engine = engineSettingsForCurrentMode();
   const benchmark = state.deviceBenchmark;
   return [
-    'Virtum SVS Viewer v0.5.10.1 · Mobile Heavy Open Rescue Hotfix',
+    'Virtum SVS Viewer v0.5.10.2 · First Pixel Compatibility Hotfix',
     `Data: ${new Date().toLocaleString('pt-BR')}`,
     `UA: ${navigator.userAgent || '—'}`,
     `Móvel/tablet: ${detectMobileDevice()}`,
@@ -2705,6 +2741,7 @@ function startupDiagnosticText() {
     `Smart Tile Scheduler: ${state.tileSchedulerMoving ? 'movimento' : 'ocioso/refino'} · fila ${state.tileSchedulerJobLimit || viewer.imageLoader?.jobLimit || '?'} · max/frame ${state.tileSchedulerMaxTilesPerFrame || 1}`,
     `Predictive Navigation: ${predictiveNavigation?.snapshot.state || 'standby'} · ${predictiveNavigation?.snapshot.completed || 0}/${predictiveNavigation?.snapshot.requested || 0} tiles · ${predictiveNavigation?.snapshot.speedViewportPerSec || 0} vp/s · ${predictiveNavigation?.snapshot.lastReason || '—'}`,
     `Instant Open: ${instantOpenEngine.snapshot.stage} · header ${instantOpenEngine.snapshot.headerMs == null ? '—' : Math.round(instantOpenEngine.snapshot.headerMs) + ' ms'} · viewer ${instantOpenEngine.snapshot.viewerOpenMs == null ? '—' : Math.round(instantOpenEngine.snapshot.viewerOpenMs) + ' ms'} · primeiro pixel ${instantOpenEngine.snapshot.firstPixelMs == null ? '—' : Math.round(instantOpenEngine.snapshot.firstPixelMs) + ' ms'} · interativo ${instantOpenEngine.snapshot.interactiveMs == null ? '—' : Math.round(instantOpenEngine.snapshot.interactiveMs) + ' ms'} · fonte ${instantOpenEngine.snapshot.firstPixelSource || '—'}`,
+    `Render drawer: ${viewer.drawer?.getType?.() || viewer.drawer?.constructor?.name || 'não informado'} · first-pixel compat ${firstPixelCompat.snapshot.confirmed ? `${firstPixelCompat.snapshot.source} · ${Math.round(firstPixelCompat.snapshot.elapsedMs || 0)} ms` : firstPixelCompat.snapshot.armed ? 'aguardando frame' : 'standby'}`,
     `Scheduler descartes: ${state.tileSchedulerDiscardedJobs} jobs em ${state.tileSchedulerQueueClears} limpezas de fila`,
     `Adaptive Backpressure: ${adaptiveBackpressure?.snapshot.label || 'Normal'} · score ${adaptiveBackpressure?.snapshot.score || 0} · tile ${adaptiveBackpressure?.snapshot.totalMs || 0} ms · decode ${adaptiveBackpressure?.snapshot.decodeMs || 0} ms · lag ${adaptiveBackpressure?.snapshot.eventLoopLagMs || 0} ms · ${adaptiveBackpressure?.snapshot.reason || 'estável'}`,
     `Primeiro tile: ${state.firstTileTotalMs == null ? '—' : `${Math.round(state.firstTileTotalMs)} ms`} · decode ${state.firstTileDecodeMs == null ? '—' : `${Math.round(state.firstTileDecodeMs)} ms`} · bitmap ${state.firstTileBitmapMs == null ? '—' : `${Math.round(state.firstTileBitmapMs)} ms`} · pixel ${state.firstPixelMs == null ? '—' : `${Math.round(state.firstPixelMs)} ms`}`,
@@ -3185,6 +3222,7 @@ async function openSvs(file) {
     state.firstPixelSource = '';
     state.firstPixelReached = false;
     state.firstTileDrawn = false;
+    firstPixelCompat.reset();
     state.deferredOpenMs = null;
     instantOpenEngine.begin({ mode: state.progressiveMode, fileSize: file.size || 0 });
     benchmarkDiagnostics.resetSession({ fileName: file.name, fileSize: file.size || 0, mode: state.progressiveMode });
@@ -3552,7 +3590,7 @@ function benchmarkTextReport() {
   const report = benchmarkReportPayload();
   const m = report.metrics;
   return [
-    'Virtum SVS Viewer v0.5.10.1 · Mobile Heavy Open Rescue Hotfix',
+    'Virtum SVS Viewer v0.5.10.2 · First Pixel Compatibility Hotfix',
     `Data: ${new Date(report.generatedAt).toLocaleString('pt-BR')}`,
     `Lâmina: ${m.fileName || '—'} · ${m.fileSize ? formatBytes(m.fileSize) : '—'} · ${m.mode}`,
     `Score da sessão: ${report.score.value}/100 · ${report.score.label}`,
@@ -3604,7 +3642,7 @@ async function copyBenchmarkReport() {
 
 function exportBenchmarkReport() {
   const payload = benchmarkReportPayload();
-  const filename = `${sanitizeBaseName(state.currentFile?.name || 'sessao')}_benchmark_v0.5.10.1.json`;
+  const filename = `${sanitizeBaseName(state.currentFile?.name || 'sessao')}_benchmark_v0.5.10.2.json`;
   downloadBlob(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' }), filename);
   showToast('Benchmark JSON exportado', 'success');
 }
@@ -6245,30 +6283,28 @@ viewer.addHandler('tile-loaded', (event) => {
     state.firstTileLoadedMs = instantOpenEngine.snapshot.firstTileMs;
     setInstantOpenBadge(true, 'Instant Open · tile pronto · desenhando primeiro pixel…');
     setStartupPhase(`Instant Open · primeiro tile pronto${state.firstTileTotalMs != null ? ` · ${Math.round(state.firstTileTotalMs)} ms` : ''} · desenhando…`);
+    const compatWatchdogMs = (detectMobileDevice() || state.engineRescueActive) ? 1200 : 1800;
+    firstPixelCompat.arm({ watchdogMs: compatWatchdogMs });
+    // Espera ao menos um frame do navegador depois do tile-loaded antes de
+    // aceitar update-viewport como confirmação visual. Em WebGL, tile-drawn
+    // não é um evento garantido pelo OpenSeadragon 6.
+    window.requestAnimationFrame(() => {
+      if (state.firstPixelReached || !state.tileLoaded) return;
+      firstPixelCompat.allowViewportFrame();
+      try { viewer.forceRedraw(); } catch (_) {}
+    });
     scheduleDiagnosticsUpdate();
   }
 });
 viewer.addHandler('tile-drawn', (event) => {
   smartCacheEngine.recordDraw(event?.tile);
   benchmarkDiagnostics.recordDraw();
-  if (!state.firstTileDrawn) {
-    state.firstTileDrawn = true;
-    releaseHeavyStartupThrottle('first-view');
-    const hadPreview = state.progressivePreviewReady;
-    const previewTiming = state.progressivePreviewMs;
-    markInstantFirstPixel('tile');
-    if (hadPreview) resetProgressivePreview();
-    redrawOverlays();
-
-    const firstPixel = state.firstPixelMs != null ? ` · primeiro pixel ${(state.firstPixelMs / 1000).toFixed(1)} s` : '';
-    const tileTiming = state.firstTileTotalMs != null ? ` · tile ${Math.round(state.firstTileTotalMs)} ms` : '';
-    const previewPart = hadPreview && previewTiming != null ? ` · preview ${(previewTiming / 1000).toFixed(1)} s` : '';
-    setStartupPhase(`Imagem visível${firstPixel}${previewPart}${tileTiming} · finalizando dados secundários`);
-    if (state.currentFile) {
-      setStatus(`${state.currentFile.name} · imagem visível${firstPixel} · refinando resolução…`);
-    }
-    scheduleDeferredOpenTasks();
-  }
+  if (!state.firstPixelReached) firstPixelCompat.observeTileDrawn();
+});
+viewer.addHandler('update-viewport', () => {
+  // OpenSeadragon recomenda update-viewport para saber quando um frame foi
+  // desenhado. Isso cobre o WebGLDrawer usado por muitas TVs/Android TV.
+  if (!state.firstPixelReached && state.tileLoaded) firstPixelCompat.observeViewportFrame();
 });
 viewer.addHandler('tile-unloaded', (event) => {
   smartCacheEngine.recordUnloaded(event || {});
